@@ -1,0 +1,12 @@
+Options -Indexes
+RewriteEngine On
+RewriteRule ^api(?:/.*)?$ api.php [QSA,L]
+RewriteRule ^images/([a-f0-9]{32}\.(webp|jpg|png))$ image.php?id=$1 [QSA,L]
+RewriteRule ^(venv|__pycache__|tmp)(/|$) - [F,L]
+
+<FilesMatch "^(lib|backup-cli)\.php$">
+  Require all denied
+</FilesMatch>
+<FilesMatch "^(\.ilmek\.env|.*\.(py|zip))$">
+  Require all denied
+</FilesMatch>
