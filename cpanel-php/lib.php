@@ -39,9 +39,11 @@ function ilmek_db(): PDO {
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         PDO::ATTR_EMULATE_PREPARES => false,
     ]);
+    // DATETIME values are stored as UTC; the browser converts them to local time.
+    $pdo->exec("SET time_zone = '+00:00'");
     $schema = [
         "CREATE TABLE IF NOT EXISTS products (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,name VARCHAR(180) NOT NULL,supplier_id INT UNSIGNED NULL,category VARCHAR(120) NOT NULL DEFAULT '',variant VARCHAR(120) NOT NULL DEFAULT '',barcode VARCHAR(80) NULL,stock INT NOT NULL DEFAULT 0,cost DECIMAL(15,4) NOT NULL DEFAULT 0,cost_usd DECIMAL(15,8) NOT NULL DEFAULT 0,price_usd DECIMAL(15,8) NOT NULL DEFAULT 0,low_stock INT NOT NULL DEFAULT 5,image VARCHAR(180) NOT NULL DEFAULT '',created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE KEY uq_products_barcode(barcode)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
-        "CREATE TABLE IF NOT EXISTS sales (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,total DECIMAL(15,2) NOT NULL,payment VARCHAR(12) NOT NULL,user_id INT UNSIGNED NULL,status VARCHAR(16) NOT NULL DEFAULT 'completed',cancel_reason VARCHAR(400) NOT NULL DEFAULT '',exchange_rate DECIMAL(15,6) NOT NULL DEFAULT 0,rate_date VARCHAR(10) NOT NULL DEFAULT '',INDEX idx_sales_created(created),INDEX idx_sales_user(user_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
+        "CREATE TABLE IF NOT EXISTS sales (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,total DECIMAL(15,2) NOT NULL,payment VARCHAR(12) NOT NULL,user_id INT UNSIGNED NULL,status VARCHAR(16) NOT NULL DEFAULT 'completed',cancelled_at DATETIME NULL,cancel_reason VARCHAR(400) NOT NULL DEFAULT '',exchange_rate DECIMAL(15,6) NOT NULL DEFAULT 0,rate_date VARCHAR(10) NOT NULL DEFAULT '',INDEX idx_sales_created(created),INDEX idx_sales_user(user_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
         "CREATE TABLE IF NOT EXISTS sale_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,sale_id BIGINT UNSIGNED NOT NULL,product_id INT UNSIGNED NULL,name VARCHAR(180) NOT NULL,qty INT NOT NULL,unit_price DECIMAL(15,2) NOT NULL,unit_cost DECIMAL(15,4) NOT NULL,INDEX idx_items_sale(sale_id),CONSTRAINT fk_items_sale FOREIGN KEY(sale_id) REFERENCES sales(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
         "CREATE TABLE IF NOT EXISTS expenses (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,title VARCHAR(180) NOT NULL,amount DECIMAL(15,2) NOT NULL,payment VARCHAR(12) NOT NULL,user_id INT UNSIGNED NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
         "CREATE TABLE IF NOT EXISTS stock_log (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,created DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,product_id INT UNSIGNED NULL,name VARCHAR(180) NOT NULL,qty INT NOT NULL,unit_cost DECIMAL(15,4) NOT NULL DEFAULT 0,note VARCHAR(400) NOT NULL DEFAULT '',user_id INT UNSIGNED NULL,INDEX idx_stocklog_created(created)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
@@ -61,6 +63,14 @@ function ilmek_db(): PDO {
         "CREATE TABLE IF NOT EXISTS sale_return_items (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,return_id BIGINT UNSIGNED NOT NULL,sale_item_id BIGINT UNSIGNED NOT NULL,product_id INT UNSIGNED NULL,name VARCHAR(180) NOT NULL,qty INT NOT NULL,amount DECIMAL(15,2) NOT NULL,INDEX idx_return_items(return_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
     ];
     foreach ($schema as $sql) $pdo->exec($sql);
+    $salesColumns=$pdo->query('SHOW COLUMNS FROM sales')->fetchAll(PDO::FETCH_COLUMN);
+    if(!in_array('cancelled_at',$salesColumns,true))$pdo->exec('ALTER TABLE sales ADD COLUMN cancelled_at DATETIME NULL');
+    $cancelMigration=$pdo->prepare("SELECT value_text FROM settings WHERE setting_key='sales_cancelled_at_backfilled'");$cancelMigration->execute();
+    if($cancelMigration->fetchColumn()!=='1'){
+        $pdo->exec("UPDATE sales s JOIN activity_log a ON a.action='Satış iptal edildi' AND a.details LIKE CONCAT('#',s.id,' ·%') SET s.cancelled_at=a.created WHERE s.status='cancelled' AND s.cancelled_at IS NULL");
+        $pdo->exec("UPDATE sales SET cancelled_at=created WHERE status='cancelled' AND cancelled_at IS NULL");
+        $pdo->exec("INSERT INTO settings(setting_key,value_text) VALUES('sales_cancelled_at_backfilled','1') ON DUPLICATE KEY UPDATE value_text='1'");
+    }
     $columns=$pdo->query('SHOW COLUMNS FROM products')->fetchAll(PDO::FETCH_COLUMN);
     if(!in_array('barcode',$columns,true))$pdo->exec('ALTER TABLE products ADD COLUMN barcode VARCHAR(80) NULL');
     if(!in_array('variant',$columns,true))$pdo->exec("ALTER TABLE products ADD COLUMN variant VARCHAR(120) NOT NULL DEFAULT ''");

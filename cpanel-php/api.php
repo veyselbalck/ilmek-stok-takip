@@ -10,11 +10,17 @@ function api_write(callable $fn): mixed {
 }
 
 function api_cash_expected(PDO $db,string $day): array {
+    $istanbul=new DateTimeZone('Europe/Istanbul');
+    $utc=new DateTimeZone('UTC');
+    $localStart=new DateTimeImmutable($day.' 00:00:00',$istanbul);
+    $start=$localStart->setTimezone($utc)->format('Y-m-d H:i:s');
+    $end=$localStart->modify('+1 day')->setTimezone($utc)->format('Y-m-d H:i:s');
     $sales=['Nakit'=>0.0,'Kart'=>0.0,'IBAN'=>0.0];
-    $q=$db->prepare("SELECT payment,SUM(total) amount FROM sales WHERE DATE(created)=? AND status='completed' GROUP BY payment");$q->execute([$day]);foreach($q->fetchAll() as $r)$sales[$r['payment']]=(float)$r['amount'];
-    $q=$db->prepare("SELECT s.payment,SUM(r.total) amount FROM sale_returns r JOIN sales s ON s.id=r.sale_id WHERE DATE(r.created)=? GROUP BY s.payment");$q->execute([$day]);foreach($q->fetchAll() as $r)$sales[$r['payment']]-=(float)$r['amount'];
+    $q=$db->prepare("SELECT payment,SUM(total) amount FROM sales WHERE created>=? AND created<? GROUP BY payment");$q->execute([$start,$end]);foreach($q->fetchAll() as $r)$sales[$r['payment']]=(float)$r['amount'];
+    $q=$db->prepare("SELECT s.payment,SUM(r.total) amount FROM sale_returns r JOIN sales s ON s.id=r.sale_id WHERE r.created>=? AND r.created<? GROUP BY s.payment");$q->execute([$start,$end]);foreach($q->fetchAll() as $r)$sales[$r['payment']]-=(float)$r['amount'];
+    $q=$db->prepare("SELECT s.payment,SUM(GREATEST(0,s.total-COALESCE((SELECT SUM(r.total) FROM sale_returns r WHERE r.sale_id=s.id),0))) amount FROM sales s WHERE s.status='cancelled' AND s.cancelled_at>=? AND s.cancelled_at<? GROUP BY s.payment");$q->execute([$start,$end]);foreach($q->fetchAll() as $r)$sales[$r['payment']]-=(float)$r['amount'];
     $out=['Nakit'=>0.0,'Kart'=>0.0,'IBAN'=>0.0];
-    foreach([['expenses','amount','created','payment'],['purchases','paid','created','payment'],['supplier_payments','amount','created','payment']] as [$table,$amount,$created,$payment]){$q=$db->prepare("SELECT $payment,SUM($amount) amount FROM $table WHERE DATE($created)=? GROUP BY $payment");$q->execute([$day]);foreach($q->fetchAll() as $r)if(isset($out[$r[$payment]]))$out[$r[$payment]]+=(float)$r['amount'];}
+    foreach([['expenses','amount','created','payment'],['purchases','paid','created','payment']] as [$table,$amount,$created,$payment]){$q=$db->prepare("SELECT $payment,SUM($amount) amount FROM $table WHERE $created>=? AND $created<? GROUP BY $payment");$q->execute([$start,$end]);foreach($q->fetchAll() as $r)if(isset($out[$r[$payment]]))$out[$r[$payment]]+=(float)$r['amount'];}
     return ['date'=>$day,'expected'=>['Nakit'=>$sales['Nakit']-$out['Nakit'],'Kart'=>$sales['Kart']-$out['Kart'],'IBAN'=>$sales['IBAN']-$out['IBAN']]];
 }
 $method=strtoupper($_SERVER['REQUEST_METHOD']??'GET');
@@ -32,15 +38,16 @@ try {
         }
         $u=ilmek_require_user();
         if($route==='/api/me')ilmek_json(['user'=>$u]);
-        if($route==='/api/cash-close'){$day=(string)($_GET['date']??(new DateTimeImmutable('now',new DateTimeZone('Europe/Istanbul')))->format('Y-m-d'));if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day))throw new InvalidArgumentException('Tarih biçimi geçersiz.');$result=api_cash_expected($db,$day);$q=$db->prepare('SELECT * FROM cash_closings WHERE closing_date=?');$q->execute([$day]);$result['closing']=$q->fetch()?:null;ilmek_json($result);}
+        if($route==='/api/cash-close'){$day=(string)($_GET['date']??(new DateTimeImmutable('now',new DateTimeZone('Europe/Istanbul')))->format('Y-m-d'));if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day)||DateTimeImmutable::createFromFormat('!Y-m-d',$day,new DateTimeZone('Europe/Istanbul'))?->format('Y-m-d')!==$day)throw new InvalidArgumentException('Tarih biçimi geçersiz.');$result=api_cash_expected($db,$day);$q=$db->prepare('SELECT * FROM cash_closings WHERE closing_date=?');$q->execute([$day]);$result['closing']=$q->fetch()?:null;ilmek_json($result);}
 
         if($route==='/api/data') {
-            $products=ilmek_normalize($db->query('SELECT p.*,sp.name AS supplier_name FROM products p LEFT JOIN suppliers sp ON sp.id=p.supplier_id ORDER BY p.name')->fetchAll(),['id','stock','low_stock'],['cost','cost_usd','price_usd']);
-            $sql='SELECT s.id,s.created,s.total,s.payment,s.user_id,s.status,s.cancel_reason,s.exchange_rate,s.rate_date,COALESCE((SELECT SUM(r.total) FROM sale_returns r WHERE r.sale_id=s.id),0) AS return_total FROM sales s';$params=[];
+            if(ilmek_setting('lavender_default_migrated')!=='1'){if(ilmek_setting('default_theme')==='sage')$db->prepare("INSERT INTO settings(setting_key,value_text) VALUES('default_theme','lavender') ON DUPLICATE KEY UPDATE value_text='lavender'")->execute();$db->prepare("INSERT INTO settings(setting_key,value_text) VALUES('lavender_default_migrated','1') ON DUPLICATE KEY UPDATE value_text='1'")->execute();}
+            $products=ilmek_normalize($db->query('SELECT p.* FROM products p ORDER BY p.name')->fetchAll(),['id','stock','low_stock'],['cost','cost_usd','price_usd']);
+            $sql='SELECT s.id,s.created,s.total,s.payment,s.user_id,s.status,s.cancel_reason,s.cancelled_at,s.exchange_rate,s.rate_date,COALESCE((SELECT SUM(r.total) FROM sale_returns r WHERE r.sale_id=s.id),0) AS return_total FROM sales s';$params=[];
             if($u['role']!=='admin'){$sql.=' WHERE s.user_id=?';$params[]=$u['id'];}
-            $q=$db->prepare($sql.' ORDER BY s.id DESC LIMIT 500');$q->execute($params);$sales=ilmek_normalize($q->fetchAll(),['id','user_id'],['total','exchange_rate']);
+            $q=$db->prepare($sql.' ORDER BY s.id DESC LIMIT 500');$q->execute($params);$sales=ilmek_normalize($q->fetchAll(),['id','user_id'],['total','return_total','exchange_rate']);
             $ids=array_column($sales,'id');$items=[];
-            if($ids){$marks=implode(',',array_fill(0,count($ids),'?'));$q=$db->prepare("SELECT si.*,COALESCE((SELECT SUM(ri.qty) FROM sale_return_items ri WHERE ri.sale_item_id=si.id),0) AS returned_qty FROM sale_items si WHERE si.sale_id IN ($marks) ORDER BY si.id DESC LIMIT 1000");$q->execute($ids);$items=ilmek_normalize($q->fetchAll(),['id','sale_id','product_id','qty','returned_qty'],['unit_price','unit_cost']);}
+            if($ids){$marks=implode(',',array_fill(0,count($ids),'?'));$q=$db->prepare("SELECT si.*,COALESCE((SELECT SUM(ri.qty) FROM sale_return_items ri WHERE ri.sale_item_id=si.id),0) AS returned_qty FROM sale_items si WHERE si.sale_id IN ($marks) ORDER BY si.id DESC");$q->execute($ids);$items=ilmek_normalize($q->fetchAll(),['id','sale_id','product_id','qty','returned_qty'],['unit_price','unit_cost']);}
             $expenses=[];if($u['role']==='admin')$expenses=ilmek_normalize($db->query('SELECT * FROM expenses ORDER BY id DESC LIMIT 100')->fetchAll(),['id','user_id'],['amount']);
             $q=$db->query('SELECT s.*,u.name AS by_name FROM stock_log s LEFT JOIN users u ON u.id=s.user_id ORDER BY s.id DESC LIMIT 500');$stock=ilmek_normalize($q->fetchAll(),['id','product_id','qty','user_id'],['unit_cost']);
             $activity=[];$staff=[];
@@ -54,13 +61,13 @@ try {
                 foreach($items as &$i)unset($i['unit_cost']);unset($i);
                 foreach($stock as &$s)unset($s['unit_cost']);unset($s);
             }
-            $extra=['settings'=>['shop_name'=>ilmek_setting('shop_name')??'Ilmek','low_stock_default'=>(int)(ilmek_setting('low_stock_default')??'5'),'default_theme'=>ilmek_setting('default_theme')??'sage','report_period'=>(int)(ilmek_setting('report_period')??'7')]];
+            $extra=['settings'=>['shop_name'=>ilmek_setting('shop_name')??'Ilmek','low_stock_default'=>(int)(ilmek_setting('low_stock_default')??'5'),'default_theme'=>ilmek_setting('default_theme')??'lavender','report_period'=>(int)(ilmek_setting('report_period')??'7')]];
             if($u['role']==='admin'){
-                foreach(['suppliers','purchases','supplier_payments','cash_closings','stock_counts'] as $table)$extra[$table]=$db->query('SELECT * FROM '.$table.' ORDER BY id DESC LIMIT 500')->fetchAll();
+                foreach(['purchases','cash_closings','stock_counts'] as $table)$extra[$table]=$db->query('SELECT * FROM '.$table.' ORDER BY id DESC LIMIT 500')->fetchAll();
                 $extra['purchase_items']=$db->query('SELECT * FROM purchase_items ORDER BY id DESC LIMIT 1000')->fetchAll();
-                $extra['sale_returns']=$db->query('SELECT * FROM sale_returns ORDER BY id DESC LIMIT 500')->fetchAll();
-                $extra['sale_return_items']=$db->query('SELECT * FROM sale_return_items ORDER BY id DESC LIMIT 1000')->fetchAll();$extra['stock_count_items']=$db->query('SELECT * FROM stock_count_items ORDER BY id DESC LIMIT 2000')->fetchAll();
-            }else $extra['suppliers']=$db->query('SELECT id,name,active FROM suppliers WHERE active=1 ORDER BY name')->fetchAll();
+                $extra['sale_returns']=$db->query('SELECT * FROM sale_returns ORDER BY id DESC')->fetchAll();
+                $extra['sale_return_items']=$db->query('SELECT * FROM sale_return_items ORDER BY id DESC')->fetchAll();$extra['stock_count_items']=$db->query('SELECT * FROM stock_count_items ORDER BY id DESC LIMIT 2000')->fetchAll();
+            }else if($ids){$marks=implode(',',array_fill(0,count($ids),'?'));$q=$db->prepare("SELECT * FROM sale_returns WHERE sale_id IN ($marks) ORDER BY id DESC");$q->execute($ids);$extra['sale_returns']=$q->fetchAll();}
             ilmek_json(['products'=>$products,'sales'=>$sales,'sale_items'=>$items,'expenses'=>$expenses,'stock_log'=>$stock,'activity'=>$activity,'users'=>$staff,'user'=>$u]+$extra);
         }
         if($route==='/api/users') {
@@ -95,7 +102,7 @@ try {
     }
     $u=ilmek_require_user();
     if($route==='/api/cash-close'&&$method==='DELETE'){
-        if($u['role']!=='admin')ilmek_json(['error'=>'Gün sonu kaydını yalnızca yönetici silebilir'],403);$day=(string)($_GET['date']??'');if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day))throw new InvalidArgumentException('Tarih biçimi geçersiz.');$q=$db->prepare('DELETE FROM cash_closings WHERE closing_date=?');$q->execute([$day]);if(!$q->rowCount())throw new InvalidArgumentException('Bu tarihte kasa kapanış kaydı bulunamadı.');ilmek_log($u,'Gün sonu kasa kaydı silindi',$day);ilmek_json(['ok'=>true]);
+        if($u['role']!=='admin')ilmek_json(['error'=>'Gün sonu kaydını yalnızca yönetici silebilir'],403);$day=(string)($_GET['date']??'');if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day)||DateTimeImmutable::createFromFormat('!Y-m-d',$day,new DateTimeZone('Europe/Istanbul'))?->format('Y-m-d')!==$day)throw new InvalidArgumentException('Tarih biçimi geçersiz.');$q=$db->prepare('DELETE FROM cash_closings WHERE closing_date=?');$q->execute([$day]);if(!$q->rowCount())throw new InvalidArgumentException('Bu tarihte kasa kapanış kaydı bulunamadı.');ilmek_log($u,'Gün sonu kasa kaydı silindi',$day);ilmek_json(['ok'=>true]);
     }
     if($route==='/api/suppliers'){
         if($u['role']!=='admin')ilmek_json(['error'=>'Tedarikçi kaydını yalnızca yönetici yapabilir'],403);
@@ -118,13 +125,13 @@ try {
     }
     if($route==='/api/purchases'){
         $r=ilmek_rate();if(($data['rate_day']??'')!==$r['snapshot_day'])throw new InvalidArgumentException('Günlük kur değişti; alış kaydını kontrol edip tekrar kaydedin.');
-        $items=$data['items']??[];$payment=(string)($data['payment']??'Borç');$paid=(float)($data['paid']??0);if(!is_array($items)||!$items||!in_array($payment,['Nakit','Kart','IBAN','Borç'],true)||$paid<0||($paid>0&&$payment==='Borç'))throw new InvalidArgumentException('Alış ve ödeme bilgilerini kontrol edin.');
-        $result=api_write(function($db)use($items,$payment,$paid,$r,$data,$u){$sid=(int)($data['supplier_id']??0);$supplier=trim((string)($data['supplier_name']??''));if($sid){$q=$db->prepare('SELECT name FROM suppliers WHERE id=?');$q->execute([$sid]);$known=$q->fetchColumn();if(!$known)throw new InvalidArgumentException('Tedarikçi bulunamadı.');$supplier=(string)$known;}elseif($supplier!==''){$q=$db->prepare('SELECT id FROM suppliers WHERE name=? LIMIT 1');$q->execute([$supplier]);$found=$q->fetchColumn();if($found)$sid=(int)$found;else{$db->prepare('INSERT INTO suppliers(name) VALUES(?)')->execute([$supplier]);$sid=(int)$db->lastInsertId();}}
+        $items=$data['items']??[];$payment=(string)($data['payment']??'');$paid=(float)($data['paid']??0);if(!is_array($items)||!$items||!in_array($payment,['Nakit','Kart','IBAN'],true)||$paid<0)throw new InvalidArgumentException('Alış ve ödeme bilgilerini kontrol edin.');
+        $result=api_write(function($db)use($items,$payment,$paid,$r,$data,$u){$supplier='';
             $checked=[];$total=0;foreach($items as $item){$pid=(int)($item['product_id']??0);$qty=filter_var($item['qty']??0,FILTER_VALIDATE_INT);$cost=(float)($item['unit_cost']??-1);if(!$pid||$qty===false||$qty<1||$cost<0)throw new InvalidArgumentException('Ürün, adet ve alış maliyetini kontrol edin.');$q=$db->prepare('SELECT * FROM products WHERE id=? FOR UPDATE');$q->execute([$pid]);$p=$q->fetch();if(!$p)throw new InvalidArgumentException('Ürün bulunamadı.');$checked[]=[$p,(int)$qty,$cost];$total+=(int)$qty*$cost;}
-            if($paid>$total)throw new InvalidArgumentException('Ödenen tutar alış toplamından fazla olamaz.');
-            $db->prepare('INSERT INTO purchases(supplier_id,supplier_name,total,paid,payment,exchange_rate,rate_date,note,user_id) VALUES(?,?,?,?,?,?,?,?,?)')->execute([$sid?:null,$supplier,$total,$paid,$paid>0?$payment:'Borç',$r['value'],$r['date'],trim((string)($data['note']??'')),$u['id']]);$purchase=(int)$db->lastInsertId();
+            if(abs($paid-$total)>0.01)throw new InvalidArgumentException('Stok alışının tamamını peşin ödeme olarak kaydedin.');
+            $db->prepare('INSERT INTO purchases(supplier_id,supplier_name,total,paid,payment,exchange_rate,rate_date,note,user_id) VALUES(?,?,?,?,?,?,?,?,?)')->execute([null,'',$total,$paid,$payment,$r['value'],$r['date'],trim((string)($data['note']??'')),$u['id']]);$purchase=(int)$db->lastInsertId();
             foreach($checked as [$p,$qty,$cost]){$old=(int)$p['stock'];$new=$old+$qty;$usd=$cost/(float)$r['value'];$avg=$new?(((float)$p['cost']*$old+$qty*$cost)/$new):$cost;$avgUsd=$new?(((float)$p['cost_usd']*$old+$qty*$usd)/$new):$usd;$db->prepare('UPDATE products SET stock=?,cost=?,cost_usd=? WHERE id=?')->execute([$new,$avg,$avgUsd,$p['id']]);$db->prepare('INSERT INTO purchase_items(purchase_id,product_id,name,variant,qty,unit_cost,unit_cost_usd) VALUES(?,?,?,?,?,?,?)')->execute([$purchase,$p['id'],$p['name'],$p['variant']??'', $qty,$cost,$usd]);$db->prepare('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)')->execute([$p['id'],$p['name'].' '.($p['variant']??''),$qty,$cost,'Yeni alım',$u['id']]);}
-            ilmek_log($u,'Alış kaydı',"#$purchase · $supplier · $total TL");return ['purchase_id'=>$purchase,'total'=>$total];});ilmek_json(['ok'=>true]+$result);
+            ilmek_log($u,'Alış kaydı',"#$purchase · $total TL");return ['purchase_id'=>$purchase,'total'=>$total];});ilmek_json(['ok'=>true]+$result);
     }
     if($route==='/api/stock-counts'){
         if($u['role']!=='admin')ilmek_json(['error'=>'Stok sayımını yalnızca yönetici kaydedebilir'],403);$items=$data['items']??[];if(!is_array($items)||!$items)throw new InvalidArgumentException('Sayım için ürün girin.');
@@ -137,7 +144,7 @@ try {
     }
     if($route==='/api/cash-close'){
         $day=(string)($data['date']??(new DateTimeImmutable('now',new DateTimeZone('Europe/Istanbul')))->format('Y-m-d'));
-        if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day))throw new InvalidArgumentException('Invalid date format.');
+        if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day)||DateTimeImmutable::createFromFormat('!Y-m-d',$day,new DateTimeZone('Europe/Istanbul'))?->format('Y-m-d')!==$day)throw new InvalidArgumentException('Invalid date format.');
         if($u['role']!=='admin'&&$day!==(new DateTimeImmutable('now',new DateTimeZone('Europe/Istanbul')))->format('Y-m-d'))ilmek_json(['error'=>'Cashiers can only close today.'],403);
         $v=$data['counted']??[];
         foreach(['Nakit','Kart','IBAN'] as $method)if(!is_array($v)||!array_key_exists($method,$v)||!is_numeric($v[$method])||(float)$v[$method]<0)throw new InvalidArgumentException('Enter zero or a positive amount for cash, card, and IBAN.');
@@ -156,7 +163,7 @@ try {
         $name=trim((string)($data['shop_name']??''));$threshold=filter_var($data['low_stock_default']??null,FILTER_VALIDATE_INT);$theme=(string)($data['default_theme']??'');$period=filter_var($data['report_period']??null,FILTER_VALIDATE_INT);
         if($name===''||mb_strlen($name,'UTF-8')>80)throw new InvalidArgumentException('Shop name must be 1-80 characters.');
         if($threshold===false||$threshold<0||$threshold>100000)throw new InvalidArgumentException('Low stock threshold must be between 0 and 100000.');
-        if(!in_array($theme,['sage','ocean','rose','plum','sand','night'],true))throw new InvalidArgumentException('Choose a valid theme.');if(!in_array($period,[1,7,30],true))throw new InvalidArgumentException('Choose a valid report period.');
+        if(!in_array($theme,['sage','ocean','rose','plum','sand','night','lavender'],true))throw new InvalidArgumentException('Choose a valid theme.');if(!in_array($period,[1,7,30],true))throw new InvalidArgumentException('Choose a valid report period.');
         api_write(function($db)use($name,$threshold,$theme,$period,$u){foreach(['shop_name'=>$name,'low_stock_default'=>(string)$threshold,'default_theme'=>$theme,'report_period'=>(string)$period] as $key=>$value){$q=$db->prepare('INSERT INTO settings(setting_key,value_text) VALUES(?,?) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text)');$q->execute([$key,$value]);}ilmek_log($u,'Shop settings updated',$name);return true;});
         ilmek_json(['ok'=>true,'settings'=>['shop_name'=>$name,'low_stock_default'=>$threshold,'default_theme'=>$theme,'report_period'=>$period]]);
     }
@@ -185,7 +192,7 @@ try {
     }
     if(preg_match('#^/api/sales/(\d+)/cancel$#',$route,$m)) {
         if($u['role']!=='admin')ilmek_json(['error'=>'Satış iptalini yalnızca yönetici yapabilir'],403);$sid=(int)$m[1];
-        api_write(function($db)use($sid,$data,$u){$q=$db->prepare('SELECT status FROM sales WHERE id=? FOR UPDATE');$q->execute([$sid]);$sale=$q->fetch();if(!$sale||$sale['status']!=='completed')throw new InvalidArgumentException('Satış bulunamadı veya zaten iptal edilmiş.');$q=$db->prepare('SELECT id,product_id,qty FROM sale_items WHERE sale_id=?');$q->execute([$sid]);foreach($q->fetchAll() as $i)if($i['product_id']!==null){$r=$db->prepare('SELECT COALESCE(SUM(qty),0) FROM sale_return_items WHERE sale_item_id=?');$r->execute([(int)$i['id']]);$remaining=max(0,(int)$i['qty']-(int)$r->fetchColumn());if($remaining){$db->prepare('UPDATE products SET stock=stock+? WHERE id=?')->execute([$remaining,(int)$i['product_id']]);$it=$db->prepare('SELECT name,unit_cost FROM sale_items WHERE id=?');$it->execute([(int)$i['id']]);$item=$it->fetch();$db->prepare('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)')->execute([(int)$i['product_id'],$item['name'],$remaining,$item['unit_cost'],'Satış iptali #'.$sid,$u['id']]);}}$reason=trim((string)($data['reason']??''))?:'Hatalı satış';$db->prepare("UPDATE sales SET status='cancelled',cancel_reason=? WHERE id=?")->execute([$reason,$sid]);ilmek_log($u,'Satış iptal edildi',"#$sid · $reason");return true;});ilmek_json(['ok'=>true]);
+        api_write(function($db)use($sid,$data,$u){$q=$db->prepare('SELECT status FROM sales WHERE id=? FOR UPDATE');$q->execute([$sid]);$sale=$q->fetch();if(!$sale||$sale['status']!=='completed')throw new InvalidArgumentException('Satış bulunamadı veya zaten iptal edilmiş.');$q=$db->prepare('SELECT id,product_id,qty FROM sale_items WHERE sale_id=?');$q->execute([$sid]);foreach($q->fetchAll() as $i)if($i['product_id']!==null){$r=$db->prepare('SELECT COALESCE(SUM(qty),0) FROM sale_return_items WHERE sale_item_id=?');$r->execute([(int)$i['id']]);$remaining=max(0,(int)$i['qty']-(int)$r->fetchColumn());if($remaining){$db->prepare('UPDATE products SET stock=stock+? WHERE id=?')->execute([$remaining,(int)$i['product_id']]);$it=$db->prepare('SELECT name,unit_cost FROM sale_items WHERE id=?');$it->execute([(int)$i['id']]);$item=$it->fetch();$db->prepare('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)')->execute([(int)$i['product_id'],$item['name'],$remaining,$item['unit_cost'],'Satış iptali #'.$sid,$u['id']]);}}$reason=trim((string)($data['reason']??''))?:'Hatalı satış';$db->prepare("UPDATE sales SET status='cancelled',cancel_reason=?,cancelled_at=CURRENT_TIMESTAMP WHERE id=?")->execute([$reason,$sid]);ilmek_log($u,'Satış iptal edildi',"#$sid · $reason");return true;});ilmek_json(['ok'=>true]);
     }
     if(preg_match('#^/api/products/(\d+)$#',$route,$m) && $method==='DELETE') {
         if($u['role']!=='admin')ilmek_json(['error'=>'Only an administrator can delete products'],403);$pid=(int)$m[1];
@@ -211,10 +218,10 @@ try {
     }
     if($route==='/api/products') {
         $r=ilmek_rate();if(($data['rate_day']??'')!==$r['snapshot_day'])throw new InvalidArgumentException('Günlük kur değişti; fiyatı kontrol edip tekrar kaydedin.');
-        $name=trim((string)($data['name']??''));$variant=trim((string)($data['variant']??''));$barcode=trim((string)($data['barcode']??''))?:null;$stock=filter_var($data['stock']??0,FILTER_VALIDATE_INT);$cost=(float)($data['cost']??0);$priceTl=(float)($data['price_tl']??0);$paid=(float)($data['paid']??0);$payment=(string)($data['payment']??'Debt');$supplier=trim((string)($data['supplier_name']??''));$debt='Bor'.chr(0xC3).chr(0xA7);if($payment==='Debt')$payment=$debt;
-        if($name===''||$stock===false||$stock<0||$cost<0||$priceTl<0||$paid<0||$paid>(int)$stock*$cost||!in_array($payment,['Nakit','Kart','IBAN',$debt],true)||($paid>0&&$payment===$debt)||$r['value']<=0)throw new InvalidArgumentException('Ürün bilgilerini kontrol edin.');
+        $name=trim((string)($data['name']??''));$variant=trim((string)($data['variant']??''));$barcode=trim((string)($data['barcode']??''))?:null;$stock=filter_var($data['stock']??0,FILTER_VALIDATE_INT);$cost=(float)($data['cost']??0);$priceTl=(float)($data['price_tl']??0);$paid=(float)($data['paid']??0);$payment=(string)($data['payment']??'Nakit');$supplier='';$debt='Bor'.chr(0xC3).chr(0xA7);
+        if($name===''||$stock===false||$stock<0||$cost<0||$priceTl<0||$paid<0||abs($paid-(int)$stock*$cost)>0.01||!in_array($payment,['Nakit','Kart','IBAN'],true)||$r['value']<=0)throw new InvalidArgumentException('Ürün bilgilerini kontrol edin.');
         if($barcode!==null){$q=$db->prepare('SELECT id FROM products WHERE barcode=?');$q->execute([$barcode]);if($q->fetch())throw new InvalidArgumentException('Bu barkod başka bir üründe kayıtlı.');}$costUsd=$cost/$r['value'];$priceUsd=$priceTl/$r['value'];$image='';if(!empty($data['image']))$image=ilmek_save_image((string)$data['image']);
-        api_write(function($db)use($name,$variant,$barcode,$stock,$cost,$costUsd,$priceUsd,$data,$image,$u,$r,$paid,$payment,$supplier,$debt){$supplierId=null;if($supplier!==''){$q=$db->prepare('SELECT id FROM suppliers WHERE name=? LIMIT 1');$q->execute([$supplier]);$supplierId=$q->fetchColumn();if(!$supplierId){$db->prepare('INSERT INTO suppliers(name) VALUES(?)')->execute([$supplier]);$supplierId=(int)$db->lastInsertId();}}$q=$db->prepare('INSERT INTO products(name,variant,barcode,supplier_id,category,stock,cost,cost_usd,price_usd,low_stock,image) VALUES(?,?,?,?,?,?,?,?,?,?,?)');$q->execute([$name,$variant,$barcode,$supplierId,trim((string)($data['category']??'')),(int)$stock,$cost,$costUsd,$priceUsd,max(0,(int)($data['low_stock']??5)),$image]);$id=(int)$db->lastInsertId();if($stock){$db->prepare('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)')->execute([$id,$name,$stock,$cost,'Initial stock',$u['id']]);$total=(int)$stock*$cost;$db->prepare('INSERT INTO purchases(supplier_id,supplier_name,total,paid,payment,exchange_rate,rate_date,note,user_id) VALUES(?,?,?,?,?,?,?,?,?)')->execute([$supplierId,$supplier,$total,$paid,$paid>0?$payment:$debt,$r['value'],$r['date'],'Initial stock',$u['id']]);$purchaseId=(int)$db->lastInsertId();$db->prepare("INSERT INTO purchase_items(purchase_id,product_id,name,variant,qty,unit_cost,unit_cost_usd) VALUES(?,?,?,'',?,?,?)")->execute([$purchaseId,$id,$name,$stock,$cost,$costUsd]);}ilmek_log($u,'Product created',$name);return true;});ilmek_json(['ok'=>true]);
+        api_write(function($db)use($name,$variant,$barcode,$stock,$cost,$costUsd,$priceUsd,$data,$image,$u,$r,$paid,$payment,$supplier,$debt){$supplierId=null;$q=$db->prepare('INSERT INTO products(name,variant,barcode,supplier_id,category,stock,cost,cost_usd,price_usd,low_stock,image) VALUES(?,?,?,?,?,?,?,?,?,?,?)');$q->execute([$name,$variant,$barcode,$supplierId,trim((string)($data['category']??'')),(int)$stock,$cost,$costUsd,$priceUsd,max(0,(int)($data['low_stock']??5)),$image]);$id=(int)$db->lastInsertId();if($stock){$db->prepare('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)')->execute([$id,$name,$stock,$cost,'Initial stock',$u['id']]);$total=(int)$stock*$cost;$db->prepare('INSERT INTO purchases(supplier_id,supplier_name,total,paid,payment,exchange_rate,rate_date,note,user_id) VALUES(?,?,?,?,?,?,?,?,?)')->execute([$supplierId,$supplier,$total,$paid,$payment,$r['value'],$r['date'],'Initial stock',$u['id']]);$purchaseId=(int)$db->lastInsertId();$db->prepare("INSERT INTO purchase_items(purchase_id,product_id,name,variant,qty,unit_cost,unit_cost_usd) VALUES(?,?,?,'',?,?,?)")->execute([$purchaseId,$id,$name,$stock,$cost,$costUsd]);}ilmek_log($u,'Product created',$name);return true;});ilmek_json(['ok'=>true]);
     }
     if($route==='/api/stock') {
         $pid=(int)($data['product_id']??0);$qty=filter_var($data['qty']??0,FILTER_VALIDATE_INT);if(!$pid||$qty===false||$qty<1)throw new InvalidArgumentException('Ürün ve geçerli adet seçin.');

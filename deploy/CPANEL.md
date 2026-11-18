@@ -1,28 +1,31 @@
-# cPanel deployment (PHP + MySQL)
+# İlmek: Güzel Hosting cPanel kurulumu (PHP + MySQL)
 
-This option is for PHP-enabled cPanel hosting. Unlike the Python deployment, it uses MySQL/MariaDB.
+Güzel Hosting desteği paylaşımlı pakette Python/WSGI çalıştırmadıklarını doğruladı. Bu nedenle mevcut Python uygulaması bu pakette çalışmaz. cPanel için yeni sürüm aynı arayüzü PHP API ve MySQL ile sunar.
 
-## Requirements
+## Gerekenler
 
-- PHP 8.1 or later with the `pdo_mysql`, `curl`, `mbstring`, and `zlib` extensions
-- A MySQL/MariaDB database and database user
-- A domain with HTTPS enabled
+- PHP 8.1 veya üzeri; `pdo_mysql`, `curl`, `mbstring`, `zlib` eklentileri.
+- cPanel MySQL/MariaDB veritabanı ve kullanıcısı.
+- `stoksistem.yildizbeautyhair.com` için SSL.
 
-## Setup
+PHP sürümünü/eklenti durumunu **Select PHP Version / PHP Extensions** ekranında kontrol edin.
 
-1. Create a database and user in cPanel. Grant the user the required permissions for that database.
-2. Upload `.htaccess`, `api.php`, `backup-cli.php`, `image.php`, and `lib.php` from `cpanel-php/` to your document root, alongside `index.html`, `app.js`, and `style.css`.
-3. Outside the document root, create `ilmek-config.php` with your server's own settings:
+## Kurulum
+
+1. cPanel **MySQL Database Wizard** ile yeni bir veritabanı ve kullanıcı oluşturun; kullanıcıya veritabanı için tüm izinleri verin. cPanel'in eklediği hesap önekli tam adları not edin.
+2. cPanel **Domains** ekranında `stoksistem.yildizbeautyhair.com` için belge kökünü bulun. Bu klasörün ana sitenizin belge kökünden ayrı olduğundan emin olun; aynı klasör görünüyorsa dosya yüklemeden önce Güzel Hosting'den subdomain'e ayrı belge kökü tanımlamalarını isteyin. **Application Manager**'daki eski Python uygulamasını **Unregister** edin; bu işlem kayıt/Passenger ayarını kaldırır, uygulama dosyalarını silmez.
+3. [PHP cPanel paketini](ilmek-cpanel-php.zip) indirin. İçindekileri subdomain'in belge köküne çıkarın. `.htaccess`, `index.html`, `app.js`, `style.css`, `api.php`, `image.php`, `lib.php` ve `backup-cli.php` aynı klasörde olmalı. File Manager'da gizli dosyaları göstermeyi açın ki `.htaccess` de yüklensin.
+4. Terminal'de `$HOME` değerini görmek için `echo "$HOME"` çalıştırın. Ana dizinde (subdomain belge kökünün dışında) `ilmek-config.php` oluşturup şu örneği kendi bilgilerinizle doldurun:
 
    ```php
    <?php
    return [
      'db_host' => 'localhost',
-     'db_name' => 'CPANEL_PREFIX_ilmek',
-     'db_user' => 'CPANEL_PREFIX_user',
-     'db_password' => 'ENTER_YOUR_DATABASE_PASSWORD',
-     'data_dir' => '/home/CPANEL_USERNAME/ilmek-data',
-     'setup_token' => 'RANDOM_ONE_TIME_SETUP_TOKEN',
+     'db_name' => 'CPANEL_ON_EK_ilmek',
+     'db_user' => 'CPANEL_ON_EK_kullanici',
+     'db_password' => 'MYSQL_KULLANICI_PAROLASI',
+     'data_dir' => '/home/CPANEL_KULLANICISI/ilmek-data',
+     'setup_token' => 'TEK_KULLANIMLIK_UZUN_RASTGELE_ANAHTAR',
      'google_drive_client_id' => '',
      'google_drive_client_secret' => '',
      'google_drive_refresh_token' => '',
@@ -30,12 +33,30 @@ This option is for PHP-enabled cPanel hosting. Unlike the Python deployment, it 
    ];
    ```
 
-   Replace the example values with your server's settings. Restrict access to this file through cPanel/SSH. Do not put it in the document root or commit it to Git.
-4. Open your HTTPS site and create the first administrator account using the setup token.
-5. After setup, remove the `setup_token` value from the configuration file.
+   `setup_token` için Terminal'de `php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'` çalıştırın. Veritabanı parolasını ve anahtarı bu sohbetle paylaşmayın. Ayar dosyasını `chmod 600 ~/ilmek-config.php` ile koruyun. `data_dir` web kökünün dışında kalmalı.
 
-## Backups
+5. Uygulamayı açın: [stoksistem.yildizbeautyhair.com](https://stoksistem.yildizbeautyhair.com). İlk istekte veritabanı tabloları otomatik oluşur. Kurulum ekranında `ilmek-config.php` içindeki anahtarı girerek yönetici hesabını oluşturun.
+6. Yönetici hesabı kurulunca `ilmek-config.php` içindeki `setup_token` değerini boşaltın ve dosya iznini tekrar `600` yapın.
 
-The database and product images are stored under `data_dir`. Use cPanel Cron Jobs to run `backup-cli.php` once a day. Keep the backup directory outside the document root and copy backups to another secure location.
+## Günlük kullanım özellikleri
 
-Google Drive backups are optional. Enter OAuth credentials only in the server configuration outside the document root. Never add them to source code.
+- Tablet uyumlu arayuzde calisanlar buyuk dugmelerle satis yapar, urun ekler, stok gorur ve gun sonu kasasini kapatir. Yonetici urun silebilir; satis veya alis gecmisi olan urunlerde kayit butunlugu icin silme engellenir.
+- Satis personeli urun ve baslangic maliyeti girebilir. Ciro, maliyet, kar, gider, iade ve yedek yonetici hesabinda kalir.
+- Yonetici satis iptali, iade, sayim, stok duzeltme, tedarikci, rapor ve yedek islemlerini yonetir. Nakit, kart ve IBAN icin gun sonu kasasi her iki rolde de kullanilabilir.
+- Ürün alış/satış bedelleri USD karşılığıyla saklanır; TL etiket fiyatı güncel günlük kurla tam liraya yuvarlanır. Tamamlanmış satış, kendi günündeki TL tutarını ve kuru korur.
+- Tema seçimi cihazda saklanır. Tema seçimi ve diğer arayüz tercihleri kullanıcı hesabına değil, kullanılan tarayıcıya özeldir.
+- Özellik tabloları mevcut veritabanı korunarak ilk PHP isteğinde oluşturulur. Yükseltmeden önce yönetici panelinden **Yedek indir** ve **Şimdi yedekle** işlemlerini yapın; sonra yeni paketin dosyalarını aynı subdomain belge köküne yükleyip eski dosyaların üzerine yazın. Veritabanını silmeyin. Ardından tarayıcıda Ctrl+F5 ile yenileyin.
+
+## Yedekleme
+
+Uygulama ürün fotoğraflarını ve kayıtları `$data_dir/backups` altında gzip'li JSON olarak yedekler. Günlük çalıştırmak için cPanel **Cron Jobs** bölümünde günde bir kez şu komutu ekleyin. PHP yolunu `command -v php` ile bulun; belge kökü yolunu cPanel **Domains** ekranından alın:
+
+```sh
+/usr/local/bin/php /home/CPANEL_KULLANICISI/SUBDOMAIN_BELGE_KOKU/backup-cli.php
+```
+
+İsteğe bağlı Google Drive için dört `google_drive_*` değerini ana dizindeki `ilmek-config.php` dosyasına girin. Yerel yedekler Drive ayarlarından bağımsız olarak alınır.
+
+## 502 / hata kaydı
+
+PHP hatalarının ayrıntıları `$data_dir/logs/php-errors.log` içinde tutulur. cPanel **Metrics → Errors** ekranını da kontrol edin. `ilmek-config.php` dosyasını, DB parolasını veya kurulum anahtarını paylaşmayın.

@@ -5,7 +5,7 @@ from pathlib import Path
 import base64, hashlib, hmac, json, os, re, secrets, sqlite3, threading, time
 import urllib.request, urllib.parse, webbrowser, zipfile
 import xml.etree.ElementTree as ET
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 
 ROOT=Path(__file__).resolve().parent
@@ -33,10 +33,22 @@ def db():
     CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),created REAL NOT NULL,last REAL NOT NULL);
     CREATE TABLE IF NOT EXISTS activity_log(id INTEGER PRIMARY KEY,created TEXT DEFAULT CURRENT_TIMESTAMP,user_id INTEGER,action TEXT NOT NULL,details TEXT DEFAULT '');
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);''')
-    for table,col,typ in [('products','image',"TEXT DEFAULT ''"),('products','cost_usd','REAL NOT NULL DEFAULT 0'),('sales','user_id','INTEGER'),('sales','status',"TEXT NOT NULL DEFAULT 'completed'"),('sales','cancel_reason',"TEXT DEFAULT ''"),('sales','exchange_rate','REAL DEFAULT 0'),('sales','rate_date',"TEXT DEFAULT ''"),('stock_log','user_id','INTEGER'),('expenses','user_id','INTEGER')]:
+    for table,col,typ in [('products','image',"TEXT DEFAULT ''"),('products','barcode',"TEXT NOT NULL DEFAULT ''"),('products','cost_usd','REAL NOT NULL DEFAULT 0'),('sales','user_id','INTEGER'),('sales','status',"TEXT NOT NULL DEFAULT 'completed'"),('sales','cancel_reason',"TEXT DEFAULT ''"),('sales','exchange_rate','REAL DEFAULT 0'),('sales','rate_date',"TEXT DEFAULT ''"),('stock_log','user_id','INTEGER'),('expenses','user_id','INTEGER')]:
         cols={x[1] for x in c.execute('PRAGMA table_info('+table+')')}
         if col not in cols: c.execute('ALTER TABLE '+table+' ADD COLUMN '+col+' '+typ)
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode COLLATE NOCASE) WHERE barcode<>''")
     return c
+
+def store_product_image(raw):
+    if not raw:return ''
+    m=re.fullmatch(r'data:image/(webp|jpeg|png);base64,([A-Za-z0-9+/=]+)',raw)
+    if not m:raise ValueError('Ürün fotoğrafı JPEG, PNG veya WebP olmalı')
+    image_type=m.group(1);b=base64.b64decode(m.group(2),validate=True)
+    valid={'webp':b.startswith(b'RIFF') and b[8:12]==b'WEBP','jpeg':b.startswith(b'\xff\xd8\xff'),'png':b.startswith(b'\x89PNG\r\n\x1a\n')}[image_type]
+    if len(b)>3*1024*1024 or not valid:raise ValueError('Fotoğraf geçersiz veya 3 MB sınırını aşıyor')
+    extension={'webp':'webp','jpeg':'jpg','png':'png'}[image_type]
+    IMAGES.mkdir(exist_ok=True);name=secrets.token_hex(16)+'.'+extension;(IMAGES/name).write_bytes(b)
+    return '/images/'+name
 
 def hash_pw(value,salt=None):
     if len(value)<10 or len(value)>256: raise ValueError('Parola 10–256 karakter aralığında olmalı')
@@ -60,7 +72,7 @@ def backup():
         with zipfile.ZipFile(path,'w',compression=zipfile.ZIP_DEFLATED) as z:
             z.write(temp,'stok.db')
             if IMAGES.exists():
-                for image in IMAGES.glob('*.webp'): z.write(image,'images/'+image.name)
+                for image in (p for ext in ('webp','jpg','png') for p in IMAGES.glob('*.'+ext)): z.write(image,'images/'+image.name)
         temp.unlink(missing_ok=True)
     for old in sorted(BACKUPS.glob('stok-*.zip'),key=lambda x:x.stat().st_mtime,reverse=True)[30:]: old.unlink(missing_ok=True)
     return path,drive_upload(path)
@@ -137,8 +149,8 @@ class Handler(BaseHTTPRequestHandler):
         return u
     def do_GET(self):
         route=self.path.split('?')[0]
-        if route in ('/','/app.js','/style.css'):
-            f=ROOT / {'/':'index.html','/app.js':'app.js','/style.css':'style.css'}[route]; b=f.read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8' if f.suffix=='.html' else 'text/javascript; charset=utf-8' if f.suffix=='.js' else 'text/css; charset=utf-8'); self.send_header('Content-Length',str(len(b))); self.send_header('X-Content-Type-Options','nosniff'); self.end_headers(); self.wfile.write(b); return
+        if route in ('/','/app.js','/style.css','/favicon.svg','/favicon.ico'):
+            f=ROOT / {'/':'index.html','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/favicon.ico':'favicon.svg'}[route]; b=f.read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8' if f.suffix=='.html' else 'text/javascript; charset=utf-8' if f.suffix=='.js' else 'text/css; charset=utf-8' if f.suffix=='.css' else 'image/svg+xml'); self.send_header('Content-Length',str(len(b))); self.send_header('X-Content-Type-Options','nosniff'); self.end_headers(); self.wfile.write(b); return
         if route=='/api/bootstrap':
             c=db(); need=c.execute("SELECT count(*) FROM users WHERE role='admin' AND active=1").fetchone()[0]==0; c.close(); return self.send({'needs_setup':need,'requires_setup_token':bool(os.environ.get('ILMEK_SETUP_TOKEN'))})
         if route=='/api/rate':
@@ -176,12 +188,12 @@ class Handler(BaseHTTPRequestHandler):
             if route=='/api/backup':
                 path,cloud=backup(); return self.send({'ok':True,'count':len(list(BACKUPS.glob('stok-*.sqlite3'))),'drive':cloud})
             c=db(); out={t:[dict(x) for x in c.execute('SELECT * FROM '+t)] for t in ['products','sales','sale_items','expenses','stock_log','activity_log','settings']}; c.close(); return self.send(out)
-        m=re.fullmatch(r'/images/([a-f0-9]{32}\.webp)',route)
+        m=re.fullmatch(r'/images/([a-f0-9]{32}\.(?:webp|jpg|png))',route)
         if m:
             if not self.require():return
             p=IMAGES/m.group(1)
             if not p.exists():return self.send({'error':'Görsel bulunamadı'},404)
-            b=p.read_bytes(); self.send_response(200); self.send_header('Content-Type','image/webp'); self.send_header('Content-Length',str(len(b))); self.send_header('Cache-Control','private, max-age=3600'); self.end_headers(); self.wfile.write(b); return
+            b=p.read_bytes(); content_type={'webp':'image/webp','jpg':'image/jpeg','png':'image/png'}[p.suffix[1:]]; self.send_response(200); self.send_header('Content-Type',content_type); self.send_header('Content-Length',str(len(b))); self.send_header('Cache-Control','private, max-age=3600'); self.end_headers(); self.wfile.write(b); return
         return self.send({'error':'Bulunamadı'},404)
     def do_POST(self):
         route=self.path.split('?')[0]
@@ -231,20 +243,59 @@ class Handler(BaseHTTPRequestHandler):
                 if not oldok:raise ValueError('Mevcut parola doğru değil')
                 if len(new)<10 or len(new)>256:raise ValueError('Yeni parola 10–256 karakter aralığında olmalı')
                 c.execute('UPDATE users SET password_hash=? WHERE id=?',(hash_pw(new),u['id']));c.execute('DELETE FROM sessions WHERE user_id=?',(u['id'],));log(c,u,'Kendi parolasını değiştirdi');c.commit();c.close();return self.send({'ok':True},headers={'Set-Cookie':'ilmek_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'})
-            if route=='/api/products':
-                r=rate();rate_day=data.get('rate_day');name=str(data.get('name','')).strip();stock=int(data.get('stock',0));cost=Decimal(str(data.get('cost',0)));price_tl=Decimal(str(data.get('price_tl',0)));image=''
+            product_edit=re.fullmatch(r'/api/products/(\d+)',route)
+            if product_edit:
+                product_id=int(product_edit.group(1));r=rate()
+                if data.get('rate_day')!=r['snapshot_day']:raise ValueError('Günlük kur değişti; fiyatı kontrol edip tekrar kaydedin')
+                p=c.execute('SELECT * FROM products WHERE id=?',(product_id,)).fetchone()
+                if not p:raise ValueError('Ürün bulunamadı')
+                name=str(data.get('name','')).strip()
+                if not name:raise ValueError('Ürün adı eksik. Ürün adını girin')
+                barcode=str(data.get('barcode','')).strip()
+                if len(barcode)>80:raise ValueError('Barkod en fazla 80 karakter olabilir')
+                if barcode and c.execute('SELECT 1 FROM products WHERE barcode=? COLLATE NOCASE AND id<>?',(barcode,product_id)).fetchone():raise ValueError('Bu barkod başka bir üründe kayıtlı')
+                try:price_tl=Decimal(str(data['price_tl']))
+                except (KeyError,InvalidOperation):raise ValueError('Satış fiyatı eksik veya geçersiz')
+                if not price_tl.is_finite() or price_tl<0:raise ValueError('Satış fiyatı 0 veya daha büyük olmalı')
+                try:low_stock=int(data['low_stock'])
+                except (KeyError,TypeError,ValueError):raise ValueError('Az stok uyarı eşiği eksik veya geçersiz')
+                if low_stock<0:raise ValueError('Az stok uyarı eşiği 0 veya daha büyük olmalı')
+                cost=float(p['cost']);cost_usd=float(p['cost_usd'] or 0)
+                if u['role']=='admin' and 'cost_tl' in data:
+                    try:cost_value=Decimal(str(data['cost_tl']))
+                    except (InvalidOperation,TypeError):raise ValueError('Alış maliyeti eksik veya geçersiz')
+                    if not cost_value.is_finite() or cost_value<0:raise ValueError('Alış maliyeti 0 veya daha büyük olmalı')
+                    cost=float(cost_value);cost_usd=float((cost_value/Decimal(str(r['value']))).quantize(Decimal('0.00000001'),rounding=ROUND_HALF_UP))
+                if r['value']<=0:raise ValueError('Günlük kur geçersiz; tekrar deneyin')
+                price_usd=float((price_tl/Decimal(str(r['value']))).quantize(Decimal('0.00000001'),rounding=ROUND_HALF_UP))
+                image=store_product_image(data.get('image',''))
+                fields=(name,barcode,str(data.get('category','')).strip(),cost,cost_usd,price_usd,low_stock)
+                if image:
+                    c.execute('UPDATE products SET name=?,barcode=?,category=?,cost=?,cost_usd=?,price_usd=?,low_stock=?,image=? WHERE id=?',(*fields,image,product_id))
+                else:
+                    c.execute('UPDATE products SET name=?,barcode=?,category=?,cost=?,cost_usd=?,price_usd=?,low_stock=? WHERE id=?',(*fields,product_id))
+                log(c,u,'Ürün bilgisi düzenlendi',name)
+            elif route=='/api/products':
+                r=rate();rate_day=data.get('rate_day');name=str(data.get('name','')).strip();image=''
                 if rate_day!=r['snapshot_day']:raise ValueError('Günlük kur değişti; fiyatı kontrol edip tekrar kaydedin')
-                if not name or stock<0 or cost<0 or price_tl<0 or r['value']<=0:raise ValueError('Ürün bilgilerini kontrol edin')
+                if not name:raise ValueError('Ürün adı eksik. Ürün adını girin')
+                barcode=str(data.get('barcode','')).strip()
+                if len(barcode)>80:raise ValueError('Barkod en fazla 80 karakter olabilir')
+                if barcode and c.execute('SELECT 1 FROM products WHERE barcode=? COLLATE NOCASE',(barcode,)).fetchone():raise ValueError('Bu barkod başka bir üründe kayıtlı')
+                try:stock=int(data['stock'])
+                except (KeyError,TypeError,ValueError):raise ValueError('Başlangıç stoğu eksik veya geçersiz; 0 veya daha büyük tam sayı girin')
+                if stock<0:raise ValueError('Başlangıç stoğu 0 veya daha büyük olmalı')
+                try:cost=Decimal(str(data['cost']))
+                except (KeyError,InvalidOperation):raise ValueError('Alış maliyeti eksik veya geçersiz')
+                if not cost.is_finite() or cost<0:raise ValueError('Alış maliyeti 0 veya daha büyük olmalı')
+                try:price_tl=Decimal(str(data['price_tl']))
+                except (KeyError,InvalidOperation):raise ValueError('Satış fiyatı eksik veya geçersiz')
+                if not price_tl.is_finite() or price_tl<0:raise ValueError('Satış fiyatı 0 veya daha büyük olmalı')
+                if r['value']<=0:raise ValueError('Günlük kur geçersiz; tekrar deneyin')
                 rate_decimal=Decimal(str(r['value']));price=float((price_tl/rate_decimal).quantize(Decimal('0.00000001'),rounding=ROUND_HALF_UP));cost_usd=float((cost/rate_decimal).quantize(Decimal('0.00000001'),rounding=ROUND_HALF_UP))
-                raw=data.get('image','')
-                if raw:
-                    m=re.fullmatch(r'data:image/webp;base64,([A-Za-z0-9+/=]+)',raw)
-                    if not m:raise ValueError('Ürün fotoğrafı WebP biçiminde olmalı')
-                    b=base64.b64decode(m.group(1),validate=True)
-                    if len(b)>3*1024*1024 or not b.startswith(b'RIFF') or b[8:12]!=b'WEBP':raise ValueError('Fotoğraf 3 MB altında WebP olmalı')
-                    IMAGES.mkdir(exist_ok=True); image=secrets.token_hex(16)+'.webp';(IMAGES/image).write_bytes(b);image='/images/'+image
-                cur=c.execute('INSERT INTO products(name,category,stock,cost,cost_usd,price_usd,low_stock,image) VALUES(?,?,?,?,?,?,?,?)',(name,str(data.get('category','')),stock,float(cost),cost_usd,price,max(0,int(data.get('low_stock',5))),image))
-                if stock:c.execute('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)',(cur.lastrowid,name,stock,cost,'İlk stok',u['id']))
+                image=store_product_image(data.get('image',''))
+                cur=c.execute('INSERT INTO products(name,barcode,category,stock,cost,cost_usd,price_usd,low_stock,image) VALUES(?,?,?,?,?,?,?,?,?)',(name,barcode,str(data.get('category','')),stock,float(cost),cost_usd,price,max(0,int(data.get('low_stock',5))),image))
+                if stock:c.execute('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)',(cur.lastrowid,name,stock,float(cost),'İlk stok',u['id']))
                 log(c,u,'Ürün eklendi',name)
             elif route=='/api/stock':
                 p=c.execute('SELECT * FROM products WHERE id=?',(int(data['product_id']),)).fetchone();q=int(data['qty'])
@@ -306,7 +357,10 @@ class Handler(BaseHTTPRequestHandler):
             c.commit();c.close()
             if route=='/api/sales':return self.send({'ok':True,'sale_id':sid,'total':total,'rate':r,'rate_date':snapshot['date'],'rate_day':snapshot['snapshot_day']})
             return self.send({'ok':True})
-        except sqlite3.IntegrityError:c.rollback();c.close();return self.send({'error':'Bu kullanıcı adı kullanımda'},409)
+        except sqlite3.IntegrityError as e:
+            c.rollback();c.close()
+            message='Bu barkod başka bir üründe kayıtlı' if 'products.barcode' in str(e) else 'Bu kullanıcı adı kullanımda'
+            return self.send({'error':message},409)
         except (ValueError,KeyError,TypeError,sqlite3.Error) as e:c.rollback();c.close();return self.send({'error':str(e)},400)
 
 if __name__=='__main__':
