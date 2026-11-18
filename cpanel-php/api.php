@@ -63,6 +63,7 @@ try {
             }
             $extra=['settings'=>['shop_name'=>ilmek_setting('shop_name')??'Ilmek','low_stock_default'=>(int)(ilmek_setting('low_stock_default')??'5'),'default_theme'=>ilmek_setting('default_theme')??'lavender','report_period'=>(int)(ilmek_setting('report_period')??'7')]];
             if($u['role']==='admin'){
+                $extra['suppliers']=ilmek_normalize($db->query('SELECT * FROM suppliers ORDER BY active DESC,name')->fetchAll(),['id','active']);
                 foreach(['purchases','cash_closings','stock_counts'] as $table)$extra[$table]=$db->query('SELECT * FROM '.$table.' ORDER BY id DESC LIMIT 500')->fetchAll();
                 $extra['purchase_items']=$db->query('SELECT * FROM purchase_items ORDER BY id DESC LIMIT 1000')->fetchAll();
                 $extra['sale_returns']=$db->query('SELECT * FROM sale_returns ORDER BY id DESC')->fetchAll();
@@ -163,7 +164,7 @@ try {
         $name=trim((string)($data['shop_name']??''));$threshold=filter_var($data['low_stock_default']??null,FILTER_VALIDATE_INT);$theme=(string)($data['default_theme']??'');$period=filter_var($data['report_period']??null,FILTER_VALIDATE_INT);
         if($name===''||mb_strlen($name,'UTF-8')>80)throw new InvalidArgumentException('Shop name must be 1-80 characters.');
         if($threshold===false||$threshold<0||$threshold>100000)throw new InvalidArgumentException('Low stock threshold must be between 0 and 100000.');
-        if(!in_array($theme,['sage','ocean','rose','plum','sand','night','lavender'],true))throw new InvalidArgumentException('Choose a valid theme.');if(!in_array($period,[1,7,30],true))throw new InvalidArgumentException('Choose a valid report period.');
+        if(!in_array($theme,['sage','ocean','rose','plum','sand','night','lavender','mint','coral','sky'],true))throw new InvalidArgumentException('Choose a valid theme.');if(!in_array($period,[1,7,30],true))throw new InvalidArgumentException('Choose a valid report period.');
         api_write(function($db)use($name,$threshold,$theme,$period,$u){foreach(['shop_name'=>$name,'low_stock_default'=>(string)$threshold,'default_theme'=>$theme,'report_period'=>(string)$period] as $key=>$value){$q=$db->prepare('INSERT INTO settings(setting_key,value_text) VALUES(?,?) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text)');$q->execute([$key,$value]);}ilmek_log($u,'Shop settings updated',$name);return true;});
         ilmek_json(['ok'=>true,'settings'=>['shop_name'=>$name,'low_stock_default'=>$threshold,'default_theme'=>$theme,'report_period'=>$period]]);
     }
