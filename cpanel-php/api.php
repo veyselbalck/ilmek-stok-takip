@@ -38,7 +38,7 @@ try {
         }
         $u=ilmek_require_user();
         if($route==='/api/me')ilmek_json(['user'=>$u]);
-        if($route==='/api/cash-close'){$day=(string)($_GET['date']??(new DateTimeImmutable('now',new DateTimeZone('Europe/Istanbul')))->format('Y-m-d'));if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day)||DateTimeImmutable::createFromFormat('!Y-m-d',$day,new DateTimeZone('Europe/Istanbul'))?->format('Y-m-d')!==$day)throw new InvalidArgumentException('Tarih biçimi geçersiz.');$result=api_cash_expected($db,$day);$q=$db->prepare('SELECT * FROM cash_closings WHERE closing_date=?');$q->execute([$day]);$result['closing']=$q->fetch()?:null;ilmek_json($result);}
+        if($route==='/api/cash-close'){$day=(string)($_GET['date']??(new DateTimeImmutable('now',new DateTimeZone('Europe/Istanbul')))->format('Y-m-d'));if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day)||DateTimeImmutable::createFromFormat('!Y-m-d',$day,new DateTimeZone('Europe/Istanbul'))?->format('Y-m-d')!==$day)throw new InvalidArgumentException('Tarih biçimi geçersiz.');$result=api_cash_expected($db,$day);$q=$db->prepare('SELECT * FROM cash_closings WHERE closing_date=?');$q->execute([$day]);$closing=$q->fetch()?:null;$result['closing']=$closing?ilmek_normalize([$closing],['id','user_id'],['expected_cash','counted_cash','expected_card','counted_card','expected_iban','counted_iban'])[0]:null;ilmek_json($result);}
 
         if($route==='/api/data') {
             if(ilmek_setting('lavender_default_migrated')!=='1'){if(ilmek_setting('default_theme')==='sage')$db->prepare("INSERT INTO settings(setting_key,value_text) VALUES('default_theme','lavender') ON DUPLICATE KEY UPDATE value_text='lavender'")->execute();$db->prepare("INSERT INTO settings(setting_key,value_text) VALUES('lavender_default_migrated','1') ON DUPLICATE KEY UPDATE value_text='1'")->execute();}
@@ -64,7 +64,7 @@ try {
             $extra=['settings'=>['shop_name'=>ilmek_setting('shop_name')??'Ilmek','low_stock_default'=>(int)(ilmek_setting('low_stock_default')??'5'),'default_theme'=>ilmek_setting('default_theme')??'lavender','report_period'=>(int)(ilmek_setting('report_period')??'7')]];
             if($u['role']==='admin'){
                 $extra['suppliers']=ilmek_normalize($db->query('SELECT * FROM suppliers ORDER BY active DESC,name')->fetchAll(),['id','active']);
-                foreach(['purchases','cash_closings','stock_counts'] as $table)$extra[$table]=$db->query('SELECT * FROM '.$table.' ORDER BY id DESC LIMIT 500')->fetchAll();
+                foreach(['purchases','cash_closings','stock_counts'] as $table){$extra[$table]=$db->query('SELECT * FROM '.$table.' ORDER BY id DESC LIMIT 500')->fetchAll();if($table==='cash_closings')$extra[$table]=ilmek_normalize($extra[$table],['id','user_id'],['expected_cash','counted_cash','expected_card','counted_card','expected_iban','counted_iban']);}
                 $extra['purchase_items']=$db->query('SELECT * FROM purchase_items ORDER BY id DESC LIMIT 1000')->fetchAll();
                 $extra['sale_returns']=$db->query('SELECT * FROM sale_returns ORDER BY id DESC')->fetchAll();
                 $extra['sale_return_items']=$db->query('SELECT * FROM sale_return_items ORDER BY id DESC')->fetchAll();$extra['stock_count_items']=$db->query('SELECT * FROM stock_count_items ORDER BY id DESC LIMIT 2000')->fetchAll();
