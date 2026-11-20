@@ -5,7 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home --home-dir /home/ilmek ilmek
 WORKDIR /app
-COPY --chown=ilmek:ilmek server.py index.html app.js style.css ./
+COPY --chown=ilmek:ilmek server.py index.html app.js style.css favicon.svg ./
+COPY --chown=ilmek:ilmek fonts ./fonts
 USER 10001:10001
 EXPOSE 8000
 CMD ["python", "-u", "server.py"]

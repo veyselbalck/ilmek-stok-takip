@@ -55,7 +55,7 @@ def hash_pw(value,salt=None):
     salt=salt or secrets.token_bytes(16); return salt.hex()+':'+hashlib.pbkdf2_hmac('sha256',value.encode(),salt,600000).hex()
 def log(c,user,action,details=''): c.execute('INSERT INTO activity_log(user_id,action,details) VALUES(?,?,?)',(user['id'],action,details[:400]))
 def make_session(user_id):
-    token=secrets.token_urlsafe(32);now=time.time();c=db();c.execute('INSERT INTO sessions(token_hash,user_id,created,last) VALUES(?,?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),user_id,now,now));c.commit();c.close();return token
+    token=secrets.token_urlsafe(32);now=time.time();c=db();c.execute('DELETE FROM sessions WHERE last<? OR created<?',(now-12*3600,now-7*24*3600));c.execute('INSERT INTO sessions(token_hash,user_id,created,last) VALUES(?,?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),user_id,now,now));c.commit();c.close();return token
 def user_for(handler):
     cookie=SimpleCookie(); cookie.load(handler.headers.get('Cookie','')); morsel=cookie.get('ilmek_session'); token=morsel.value if morsel else ''
     if not token:return None
@@ -96,6 +96,22 @@ def daily_backup():
             if time.time()-max((p.stat().st_mtime for p in BACKUPS.glob('stok-*.zip')),default=0)>22*3600: backup()
         except Exception: pass
 
+STATIC={'/':('index.html','text/html; charset=utf-8'),'/app.js':('app.js','text/javascript; charset=utf-8'),'/style.css':('style.css','text/css; charset=utf-8'),'/favicon.svg':('favicon.svg','image/svg+xml'),'/favicon.ico':('favicon.svg','image/svg+xml')}
+FONT_ROUTE=re.compile(r'/fonts/([a-z0-9-]+\.woff2)')
+# Scripts may only come from this origin (the UI uses no inline scripts); styles allow inline style attributes (charts).
+SECURITY_HEADERS={'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'same-origin','Permissions-Policy':'camera=(), microphone=(), geolocation=()'}
+UNSUPPORTED='Bu işlem Python sürümünde henüz desteklenmiyor. Tam özellikler için PHP sürümünü kullanın (deploy/CPANEL.md).'
+
+def stock_in(c,u,p,q,cost,r,price=None):
+    """Add purchased stock to product row `p`: weighted-average cost in TL and USD, stock log, activity log."""
+    total=p['stock']+q
+    avg=((Decimal(str(p['stock']))*Decimal(str(p['cost'])))+(Decimal(q)*cost))/Decimal(str(total))
+    avg_usd=((Decimal(str(p['stock']))*Decimal(str(p['cost_usd'])))+(Decimal(q)*cost/Decimal(str(r['value']))))/Decimal(str(total))
+    c.execute('UPDATE products SET stock=stock+?,cost=?,cost_usd=?,price_usd=COALESCE(?,price_usd) WHERE id=?',(q,float(avg),float(avg_usd),price,p['id']))
+    c.execute('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)',(p['id'],p['name'],q,float(cost),'Yeni alım',u['id']))
+    log(c,u,'Stok alımı',f"{p['name']} · {q} adet · {cost:g} TL/adet")
+
 rate_lock=threading.Lock()
 def fetch_tcmb_rate():
     req=urllib.request.Request('https://www.tcmb.gov.tr/kurlar/today.xml',headers={'User-Agent':'IlmekPOS/1.0'})
@@ -133,8 +149,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self,*a): pass
     def send(self,obj,status=200,headers=None):
         b=json.dumps(obj,ensure_ascii=False).encode(); self.send_response(status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(b))); self.send_header('Cache-Control','no-store'); self.send_header('X-Content-Type-Options','nosniff')
+        for k,v in SECURITY_HEADERS.items(): self.send_header(k,v)
         for k,v in (headers or {}).items(): self.send_header(k,v)
         self.end_headers(); self.wfile.write(b)
+    def do_DELETE(self):
+        return self.send({'error':UNSUPPORTED},501)
     def body(self):
         n=int(self.headers.get('Content-Length',0))
         if n>5*1024*1024: raise ValueError('İstek boyutu çok büyük')
@@ -149,8 +168,17 @@ class Handler(BaseHTTPRequestHandler):
         return u
     def do_GET(self):
         route=self.path.split('?')[0]
-        if route in ('/','/app.js','/style.css','/favicon.svg','/favicon.ico'):
-            f=ROOT / {'/':'index.html','/app.js':'app.js','/style.css':'style.css','/favicon.svg':'favicon.svg','/favicon.ico':'favicon.svg'}[route]; b=f.read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8' if f.suffix=='.html' else 'text/javascript; charset=utf-8' if f.suffix=='.js' else 'text/css; charset=utf-8' if f.suffix=='.css' else 'image/svg+xml'); self.send_header('Content-Length',str(len(b))); self.send_header('X-Content-Type-Options','nosniff'); self.end_headers(); self.wfile.write(b); return
+        font=FONT_ROUTE.fullmatch(route)
+        if route in STATIC or font:
+            if font:
+                f=ROOT/'fonts'/font.group(1); ctype='font/woff2'
+                if not f.is_file():return self.send({'error':'Bulunamadı'},404)
+            else:
+                name,ctype=STATIC[route]; f=ROOT/name
+            b=f.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(b)))
+            self.send_header('Cache-Control','public, max-age=86400' if font else 'no-cache')
+            for k,v in SECURITY_HEADERS.items(): self.send_header(k,v)
+            self.end_headers(); self.wfile.write(b); return
         if route=='/api/bootstrap':
             c=db(); need=c.execute("SELECT count(*) FROM users WHERE role='admin' AND active=1").fetchone()[0]==0; c.close(); return self.send({'needs_setup':need,'requires_setup_token':bool(os.environ.get('ILMEK_SETUP_TOKEN'))})
         if route=='/api/rate':
@@ -163,14 +191,16 @@ class Handler(BaseHTTPRequestHandler):
         if route=='/api/me': return self.send({'user':u})
         if route=='/api/data':
             c=db(); products=[dict(x) for x in c.execute('SELECT * FROM products ORDER BY name COLLATE NOCASE')]
-            sql='SELECT id,created,total,payment,user_id,status,cancel_reason,exchange_rate,rate_date FROM sales'; params=()
-            if u['role']!='admin': sql+=' WHERE user_id=?'; params=(u['id'],)
-            sales=[dict(x) for x in c.execute(sql+' ORDER BY id DESC LIMIT 100',params)]; ids=[x['id'] for x in sales]
+            # Reports are computed in the browser from these rows: send every sale of the last 36 days (plus the newest ones), not just "the latest 100".
+            since=time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(time.time()-36*86400))
+            sql='SELECT id,created,total,payment,user_id,status,cancel_reason,exchange_rate,rate_date FROM sales WHERE (created>=? OR id+200>(SELECT COALESCE(MAX(id),0) FROM sales))'; params=(since,)
+            if u['role']!='admin': sql+=' AND user_id=?'; params=(since,u['id'])
+            sales=[dict(x) for x in c.execute(sql+' ORDER BY id DESC LIMIT 5000',params)]; ids=[x['id'] for x in sales]
             items=[]
             if ids:
-                marks=','.join('?' for _ in ids); items=[dict(x) for x in c.execute(f'SELECT * FROM sale_items WHERE sale_id IN ({marks}) ORDER BY id DESC LIMIT 500',ids)]
-            expenses=[dict(x) for x in c.execute('SELECT * FROM expenses ORDER BY id DESC LIMIT 100')] if u['role']=='admin' else []
-            logrows=[dict(x) for x in c.execute('SELECT s.*,u.name AS by_name FROM stock_log s LEFT JOIN users u ON u.id=s.user_id ORDER BY s.id DESC LIMIT 50')]
+                marks=','.join('?' for _ in ids); items=[dict(x) for x in c.execute(f'SELECT * FROM sale_items WHERE sale_id IN ({marks}) ORDER BY id DESC',ids)]
+            expenses=[dict(x) for x in c.execute('SELECT * FROM expenses WHERE created>=? OR id+50>(SELECT COALESCE(MAX(id),0) FROM expenses) ORDER BY id DESC LIMIT 5000',(since,))] if u['role']=='admin' else []
+            logrows=[dict(x) for x in c.execute('SELECT s.*,u.name AS by_name FROM stock_log s LEFT JOIN users u ON u.id=s.user_id WHERE s.created>=? ORDER BY s.id DESC LIMIT 5000',(since,))]
             activity=[dict(x) for x in c.execute('SELECT a.id,a.created,u.name,a.action,a.details FROM activity_log a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 100')] if u['role']=='admin' else []
             staff=[dict(x) for x in c.execute('SELECT id,name,role FROM users')] if u['role']=='admin' else []
             c.close()
@@ -186,15 +216,15 @@ class Handler(BaseHTTPRequestHandler):
         if route=='/api/backup' or route=='/api/export':
             if u['role']!='admin':return self.send({'error':'Bu bölüm yalnızca yöneticiye açık'},403)
             if route=='/api/backup':
-                path,cloud=backup(); return self.send({'ok':True,'count':len(list(BACKUPS.glob('stok-*.sqlite3'))),'drive':cloud})
+                path,cloud=backup(); return self.send({'ok':True,'count':len(list(BACKUPS.glob('stok-*.zip'))),'drive':cloud})
             c=db(); out={t:[dict(x) for x in c.execute('SELECT * FROM '+t)] for t in ['products','sales','sale_items','expenses','stock_log','activity_log','settings']}; c.close(); return self.send(out)
         m=re.fullmatch(r'/images/([a-f0-9]{32}\.(?:webp|jpg|png))',route)
         if m:
             if not self.require():return
             p=IMAGES/m.group(1)
             if not p.exists():return self.send({'error':'Görsel bulunamadı'},404)
-            b=p.read_bytes(); content_type={'webp':'image/webp','jpg':'image/jpeg','png':'image/png'}[p.suffix[1:]]; self.send_response(200); self.send_header('Content-Type',content_type); self.send_header('Content-Length',str(len(b))); self.send_header('Cache-Control','private, max-age=3600'); self.end_headers(); self.wfile.write(b); return
-        return self.send({'error':'Bulunamadı'},404)
+            b=p.read_bytes(); content_type={'webp':'image/webp','jpg':'image/jpeg','png':'image/png'}[p.suffix[1:]]; self.send_response(200); self.send_header('Content-Type',content_type); self.send_header('Content-Length',str(len(b))); self.send_header('Cache-Control','private, max-age=3600'); self.send_header('X-Content-Type-Options','nosniff'); self.end_headers(); self.wfile.write(b); return
+        return self.send({'error':UNSUPPORTED if route.startswith('/api/') else 'Bulunamadı'},404)
     def do_POST(self):
         route=self.path.split('?')[0]
         try:data=self.body()
@@ -219,6 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             if u:
                 try:salt,expected=u['password_hash'].split(':'); valid=hmac.compare_digest(hashlib.pbkdf2_hmac('sha256',str(data.get('password','')).encode(),bytes.fromhex(salt),600000).hex(),expected)
                 except Exception:pass
+            else:hashlib.pbkdf2_hmac('sha256',str(data.get('password','')).encode(),b'\x00'*16,600000)  # same work as a real check, so timing does not reveal which usernames exist
             if not valid:login_failures[ip]=failures+[time.time()];return self.send({'error':'Kullanıcı adı veya parola hatalı'},401)
             login_failures.pop(ip,None)
             token=make_session(u['id']);return self.send({'user':{'id':u['id'],'username':u['username'],'name':u['name'],'role':u['role']}},headers=self.cookie(token))
@@ -228,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if route=='/api/logout':
                 cookie=SimpleCookie();cookie.load(self.headers.get('Cookie',''));m=cookie.get('ilmek_session')
-                if m:c.execute('DELETE FROM sessions WHERE token_hash=?',(hashlib.sha256(m.value.encode()).hexdigest(),))
+                if m:c.execute('DELETE FROM sessions WHERE token_hash=?',(hashlib.sha256(m.value.encode()).hexdigest(),));c.commit()
                 c.close();return self.send({'ok':True},headers={'Set-Cookie':'ilmek_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'})
             cancel=re.fullmatch(r'/api/sales/(\d+)/cancel',route)
             if cancel:
@@ -304,9 +335,17 @@ class Handler(BaseHTTPRequestHandler):
                 if price_tl is not None:
                     if data.get('rate_day')!=r['snapshot_day']:raise ValueError('Günlük kur değişti; satış fiyatını kontrol edip tekrar kaydedin')
                     price=float((Decimal(str(price_tl))/Decimal(str(r['value']))).quantize(Decimal('0.00000001'),rounding=ROUND_HALF_UP))
-                avg=((Decimal(str(p['stock']))*Decimal(str(p['cost'])))+(Decimal(q)*cost))/(Decimal(str(p['stock']+q))) if p['stock']+q else cost
-                avg_usd=((Decimal(str(p['stock']))*Decimal(str(p['cost_usd'])))+(Decimal(q)*cost/Decimal(str(r['value']))))/(Decimal(str(p['stock']+q))) if p['stock']+q else cost/Decimal(str(r['value']))
-                c.execute('UPDATE products SET stock=stock+?,cost=?,cost_usd=?,price_usd=COALESCE(?,price_usd) WHERE id=?',(q,float(avg),float(avg_usd),price,p['id']));c.execute('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)',(p['id'],p['name'],q,float(cost),'Yeni alım',u['id']));log(c,u,'Stok alımı',f"{p['name']} · {q} adet · {cost:g} TL/adet")
+                stock_in(c,u,p,q,cost,r,price)
+            elif route=='/api/purchases':
+                # Stock-in as sent by the current UI: several lines, each paid in full at the time of purchase.
+                r=rate()
+                if data.get('rate_day')!=r['snapshot_day']:raise ValueError('Günlük kur değişti; alış kaydını kontrol edip tekrar kaydedin')
+                lines=data.get('items')
+                if not isinstance(lines,list) or not lines:raise ValueError('Alış bilgilerini kontrol edin')
+                for line in lines:
+                    p=c.execute('SELECT * FROM products WHERE id=?',(int(line['product_id']),)).fetchone();q=int(line['qty']);cost=Decimal(str(line['unit_cost']))
+                    if not p or q<1 or not cost.is_finite() or cost<0:raise ValueError('Ürün, adet ve alış maliyetini kontrol edin')
+                    stock_in(c,u,p,q,cost,r)
             elif route=='/api/sales':
                 snapshot=rate();items=data.get('items',[]);method=data.get('payment');r=snapshot['value']
                 if data.get('rate_day')!=snapshot['snapshot_day']:raise ValueError('Günlük kur yenilendi; sepet fiyatlarını kontrol edip tekrar deneyin')
@@ -353,7 +392,7 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute('UPDATE users SET active=? WHERE id=?',(newactive,target))
                 if not newactive:c.execute('DELETE FROM sessions WHERE user_id=?',(target,))
                 log(c,u,'Hesap etkinleştirildi' if newactive else 'Hesap kapatıldı',str(target))
-            else:c.close();return self.send({'error':'Bulunamadı'},404)
+            elif not cancel:c.close();return self.send({'error':UNSUPPORTED},404)   # sale cancellation is handled above and must still reach the commit below
             c.commit();c.close()
             if route=='/api/sales':return self.send({'ok':True,'sale_id':sid,'total':total,'rate':r,'rate_date':snapshot['date'],'rate_day':snapshot['snapshot_day']})
             return self.send({'ok':True})

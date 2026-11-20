@@ -1,1 +1,49 @@
-<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f6f1e9"><title>İlmek • Tuhafiye</title><link rel="stylesheet" href="/style.css"></head><body><div id="login" class="login"><div class="loginbox"><div class="brandicon">✿</div><div class="eyebrow">AİLE DÜKKÂNIMIZ</div><h1>İlmek</h1><p>Stok ve satış paneli</p><form id="loginForm"><label>Kullanıcı adı<input id="username" autocomplete="username" required></label><label>Parola<input id="password" type="password" autocomplete="current-password" required></label><button class="primary full">Panele gir <span>→</span></button></form></div></div><div id="app" class="hidden"><aside class="sidebar"><div class="brand"><div class="brandicon">✿</div><div><b>İlmek</b><small>TUHAfiYE YÖNETİMİ</small></div></div><nav><button data-page="home" class="nav active"><span>⌂</span> Genel bakış</button><button data-page="sales" class="nav"><span>＋</span> Satış yap</button><button data-page="stock" class="nav"><span>▦</span> Stoklar</button><button data-page="reports" class="nav admin-only"><span>◷</span> Raporlar</button><button data-page="staff" class="nav admin-only"><span>♙</span> Çalışan hesapları</button></nav><div class="sidefoot"><div class="dot"></div><span id="signedName">Oturum açık</span><br></div></aside><main><header><div><div class="eyebrow" id="today"></div><h1 id="title">Günaydın ☀️</h1></div><div class="headright"><div class="ratebox"><span class="live"></span><span>1 USD = <b id="rate">…</b> TL</span><small id="rateDate">Kur alınıyor</small></div><button id="settingsButton" class="settings-button" type="button" aria-label="Ayarlar" title="Ayarlar" onclick="go('settings')">&#9881;<span>Ayarlar</span></button><div class="avatar">İ</div></div></header><div id="content"></div></main><nav class="mobile-nav"><button data-page="home" class="nav active"><span>⌂</span>Özet</button><button data-page="sales" class="nav"><span>＋</span>Satış</button><button data-page="stock" class="nav"><span>▦</span>Stok</button><button data-page="reports" class="nav admin-only"><span>◷</span>Rapor</button></nav></div><div id="toast" class="toast"></div><div id="modal" class="modal hidden"></div><script src="/app.js"></script></body></html>
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f7f5f0">
+<title>İlmek • Tuhafiye</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/fonts/manrope-latin.woff2?v=2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/dmsans-latin.woff2?v=2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/style.css?v=4">
+</head>
+<body>
+<a class="skip-link" href="#content">İçeriğe geç</a>
+<noscript><p class="noscript">İlmek'i kullanmak için tarayıcınızda JavaScript açık olmalı.</p></noscript>
+
+<div id="login" class="login">
+  <main class="loginbox" id="loginBox" aria-live="polite"><p class="login-loading">Yükleniyor…</p></main>
+</div>
+
+<div id="app" class="hidden">
+  <div class="appbar">
+    <div class="appbar-inner">
+      <div class="brandline"><span class="brandicon" id="brandIcon" aria-hidden="true"></span><b id="shopName">İlmek</b></div>
+      <div class="headright">
+        <div class="ratebox" role="status" aria-live="polite"><span class="live" aria-hidden="true"></span><span>1 USD = <b id="rate">…</b> TL</span><small id="rateDate">Kur alınıyor</small></div>
+        <button id="settingsButton" class="settings-button" type="button" data-act="go" data-page="settings" aria-label="Ayarlar">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>Ayarlar</span>
+        </button>
+        <div class="avatar" id="avatar" aria-hidden="true"></div>
+      </div>
+    </div>
+  </div>
+  <main class="wrap" id="main">
+    <div class="pagetop">
+      <button type="button" id="backBtn" class="back-link hidden" data-act="go" data-page="home"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>Ana menü</button>
+      <div class="eyebrow" id="today"></div>
+      <h1 id="title" tabindex="-1"></h1>
+    </div>
+    <div id="content"></div>
+  </main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<div id="modal" class="modal hidden"></div>
+<div id="dialog" class="modal hidden"></div>
+<script src="/app.js?v=4"></script>
+</body>
+</html>

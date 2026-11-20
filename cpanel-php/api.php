@@ -43,13 +43,16 @@ try {
         if($route==='/api/data') {
             if(ilmek_setting('lavender_default_migrated')!=='1'){if(ilmek_setting('default_theme')==='sage')$db->prepare("INSERT INTO settings(setting_key,value_text) VALUES('default_theme','lavender') ON DUPLICATE KEY UPDATE value_text='lavender'")->execute();$db->prepare("INSERT INTO settings(setting_key,value_text) VALUES('lavender_default_migrated','1') ON DUPLICATE KEY UPDATE value_text='1'")->execute();}
             $products=ilmek_normalize($db->query('SELECT p.* FROM products p ORDER BY p.name')->fetchAll(),['id','stock','low_stock'],['cost','cost_usd','price_usd']);
-            $sql='SELECT s.id,s.created,s.total,s.payment,s.user_id,s.status,s.cancel_reason,s.cancelled_at,s.exchange_rate,s.rate_date,COALESCE((SELECT SUM(r.total) FROM sale_returns r WHERE r.sale_id=s.id),0) AS return_total FROM sales s';$params=[];
-            if($u['role']!=='admin'){$sql.=' WHERE s.user_id=?';$params[]=$u['id'];}
-            $q=$db->prepare($sql.' ORDER BY s.id DESC LIMIT 500');$q->execute($params);$sales=ilmek_normalize($q->fetchAll(),['id','user_id'],['total','return_total','exchange_rate']);
+            $sql='SELECT s.id,s.created,s.total,s.payment,s.user_id,s.status,s.cancel_reason,s.cancelled_at,s.exchange_rate,s.rate_date,COALESCE((SELECT SUM(r.total) FROM sale_returns r WHERE r.sale_id=s.id),0) AS return_total FROM sales s';
+            /* Reports are computed in the browser from these rows, so send every sale of the last 36 days (not "the latest 500",
+               which silently under-counts a busy month) plus the newest ones so the history list is never empty. 5000 is only a safety cap. */
+            $since=gmdate('Y-m-d H:i:s',time()-36*86400);$params=[$since];$sql.=' WHERE (s.created>=? OR s.id+200>(SELECT COALESCE(MAX(id),0) FROM sales))';
+            if($u['role']!=='admin'){$sql.=' AND s.user_id=?';$params[]=$u['id'];}
+            $q=$db->prepare($sql.' ORDER BY s.id DESC LIMIT 5000');$q->execute($params);$sales=ilmek_normalize($q->fetchAll(),['id','user_id'],['total','return_total','exchange_rate']);
             $ids=array_column($sales,'id');$items=[];
             if($ids){$marks=implode(',',array_fill(0,count($ids),'?'));$q=$db->prepare("SELECT si.*,COALESCE((SELECT SUM(ri.qty) FROM sale_return_items ri WHERE ri.sale_item_id=si.id),0) AS returned_qty FROM sale_items si WHERE si.sale_id IN ($marks) ORDER BY si.id DESC");$q->execute($ids);$items=ilmek_normalize($q->fetchAll(),['id','sale_id','product_id','qty','returned_qty'],['unit_price','unit_cost']);}
-            $expenses=[];if($u['role']==='admin')$expenses=ilmek_normalize($db->query('SELECT * FROM expenses ORDER BY id DESC LIMIT 100')->fetchAll(),['id','user_id'],['amount']);
-            $q=$db->query('SELECT s.*,u.name AS by_name FROM stock_log s LEFT JOIN users u ON u.id=s.user_id ORDER BY s.id DESC LIMIT 500');$stock=ilmek_normalize($q->fetchAll(),['id','product_id','qty','user_id'],['unit_cost']);
+            $expenses=[];if($u['role']==='admin'){$q=$db->prepare('SELECT * FROM expenses WHERE created>=? OR id+50>(SELECT COALESCE(MAX(id),0) FROM expenses) ORDER BY id DESC LIMIT 5000');$q->execute([$since]);$expenses=ilmek_normalize($q->fetchAll(),['id','user_id'],['amount']);}
+            $q=$db->prepare('SELECT s.*,u.name AS by_name FROM stock_log s LEFT JOIN users u ON u.id=s.user_id WHERE s.created>=? ORDER BY s.id DESC LIMIT 5000');$q->execute([$since]);$stock=ilmek_normalize($q->fetchAll(),['id','product_id','qty','user_id'],['unit_cost']);
             $activity=[];$staff=[];
             if($u['role']==='admin'){
                 $activity=$db->query('SELECT a.id,a.created,u.name,a.action,a.details FROM activity_log a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT 100')->fetchAll();
@@ -83,7 +86,7 @@ try {
         ilmek_json(['error'=>'Bulunamadı'],404);
     }
     if(!in_array($method,['POST','DELETE'],true))ilmek_json(['error'=>'Yöntem desteklenmiyor'],405);
-    try {$data=ilmek_body();}catch(Throwable $e){ilmek_json(['error'=>'Geçersiz veya büyük istek.'],400);}
+    try {$data=ilmek_body($route==='/api/restore'?60*1024*1024:8*1024*1024);}catch(Throwable $e){ilmek_json(['error'=>'Geçersiz veya büyük istek.'],400);}
     if($route==='/api/setup-admin') {
         $cfg=ilmek_config();$expected=(string)($cfg['setup_token']??'');
         if($expected!==''&&!hash_equals($expected,(string)($data['setup_token']??'')))ilmek_json(['error'=>'Kurulum anahtarı yanlış'],403);
@@ -98,6 +101,7 @@ try {
         $db->prepare('DELETE FROM login_failures WHERE created<?')->execute([$cut]);$q=$db->prepare('SELECT COUNT(*) FROM login_failures WHERE ip_hash=? AND created>?');$q->execute([$ipHash,$cut]);
         if((int)$q->fetchColumn()>=8)ilmek_json(['error'=>'Çok sayıda deneme oldu. 15 dakika sonra tekrar deneyin.'],429);
         $q=$db->prepare('SELECT * FROM users WHERE username=? AND active=1 LIMIT 1');$q->execute([trim((string)($data['username']??''))]);$row=$q->fetch();
+        if(!$row)password_hash((string)($data['password']??''),PASSWORD_DEFAULT);   /* same work as a real check, so response time does not reveal which usernames exist */
         if(!$row||!password_verify((string)($data['password']??''),$row['password_hash'])){$db->prepare('INSERT INTO login_failures(ip_hash,created) VALUES(?,?)')->execute([$ipHash,time()]);ilmek_json(['error'=>'Kullanıcı adı veya parola hatalı'],401);}
         $db->prepare('DELETE FROM login_failures WHERE ip_hash=?')->execute([$ipHash]);$user=api_user_row($row);ilmek_new_session($user['id']);ilmek_json(['user'=>$user]);
     }
@@ -145,27 +149,27 @@ try {
     }
     if($route==='/api/cash-close'){
         $day=(string)($data['date']??(new DateTimeImmutable('now',new DateTimeZone('Europe/Istanbul')))->format('Y-m-d'));
-        if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day)||DateTimeImmutable::createFromFormat('!Y-m-d',$day,new DateTimeZone('Europe/Istanbul'))?->format('Y-m-d')!==$day)throw new InvalidArgumentException('Invalid date format.');
-        if($u['role']!=='admin'&&$day!==(new DateTimeImmutable('now',new DateTimeZone('Europe/Istanbul')))->format('Y-m-d'))ilmek_json(['error'=>'Cashiers can only close today.'],403);
+        if(!preg_match('/^\d{4}-\d{2}-\d{2}$/',$day)||DateTimeImmutable::createFromFormat('!Y-m-d',$day,new DateTimeZone('Europe/Istanbul'))?->format('Y-m-d')!==$day)throw new InvalidArgumentException('Tarih biçimi geçersiz.');
+        if($u['role']!=='admin'&&$day!==(new DateTimeImmutable('now',new DateTimeZone('Europe/Istanbul')))->format('Y-m-d'))ilmek_json(['error'=>'Satış elemanları yalnızca bugünün kasasını kapatabilir.'],403);
         $v=$data['counted']??[];
-        foreach(['Nakit','Kart','IBAN'] as $method)if(!is_array($v)||!array_key_exists($method,$v)||!is_numeric($v[$method])||(float)$v[$method]<0)throw new InvalidArgumentException('Enter zero or a positive amount for cash, card, and IBAN.');
+        foreach(['Nakit','Kart','IBAN'] as $method)if(!is_array($v)||!array_key_exists($method,$v)||!is_numeric($v[$method])||(float)$v[$method]<0)throw new InvalidArgumentException('Nakit, kart ve IBAN için sıfır veya pozitif bir tutar girin.');
         $cash=(float)$v['Nakit'];$card=(float)$v['Kart'];$iban=(float)$v['IBAN'];$note=mb_substr(trim((string)($data['note']??'')),0,400,'UTF-8');
         $result=api_write(function($db)use($day,$cash,$card,$iban,$note,$u){
             $expected=api_cash_expected($db,$day)['expected'];
             $sql='INSERT INTO cash_closings(closing_date,expected_cash,counted_cash,expected_card,counted_card,expected_iban,counted_iban,note,user_id) VALUES(?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE expected_cash=VALUES(expected_cash),counted_cash=VALUES(counted_cash),expected_card=VALUES(expected_card),counted_card=VALUES(counted_card),expected_iban=VALUES(expected_iban),counted_iban=VALUES(counted_iban),note=VALUES(note),user_id=VALUES(user_id),created=CURRENT_TIMESTAMP';
             $db->prepare($sql)->execute([$day,$expected['Nakit'],$cash,$expected['Kart'],$card,$expected['IBAN'],$iban,$note,$u['id']]);
-            ilmek_log($u,'Cash close saved',$day);
+            ilmek_log($u,'Gün sonu kasası kaydedildi',$day);
             return ['expected'=>$expected,'difference'=>['Nakit'=>$cash-$expected['Nakit'],'Kart'=>$card-$expected['Kart'],'IBAN'=>$iban-$expected['IBAN']]];
         });
         ilmek_json(['ok'=>true,'date'=>$day]+$result);
     }
     if($route==='/api/settings'){
-        if($u['role']!=='admin')ilmek_json(['error'=>'Only an administrator can change settings.'],403);
+        if($u['role']!=='admin')ilmek_json(['error'=>'Ayarları yalnızca yönetici değiştirebilir.'],403);
         $name=trim((string)($data['shop_name']??''));$threshold=filter_var($data['low_stock_default']??null,FILTER_VALIDATE_INT);$theme=(string)($data['default_theme']??'');$period=filter_var($data['report_period']??null,FILTER_VALIDATE_INT);
-        if($name===''||mb_strlen($name,'UTF-8')>80)throw new InvalidArgumentException('Shop name must be 1-80 characters.');
-        if($threshold===false||$threshold<0||$threshold>100000)throw new InvalidArgumentException('Low stock threshold must be between 0 and 100000.');
-        if(!in_array($theme,['sage','ocean','rose','plum','sand','night','lavender','mint','coral','sky'],true))throw new InvalidArgumentException('Choose a valid theme.');if(!in_array($period,[1,7,30],true))throw new InvalidArgumentException('Choose a valid report period.');
-        api_write(function($db)use($name,$threshold,$theme,$period,$u){foreach(['shop_name'=>$name,'low_stock_default'=>(string)$threshold,'default_theme'=>$theme,'report_period'=>(string)$period] as $key=>$value){$q=$db->prepare('INSERT INTO settings(setting_key,value_text) VALUES(?,?) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text)');$q->execute([$key,$value]);}ilmek_log($u,'Shop settings updated',$name);return true;});
+        if($name===''||mb_strlen($name,'UTF-8')>80)throw new InvalidArgumentException('Dükkân adı 1–80 karakter olmalı.');
+        if($threshold===false||$threshold<0||$threshold>100000)throw new InvalidArgumentException('Düşük stok eşiği 0 ile 100000 arasında olmalı.');
+        if(!in_array($theme,['sage','ocean','rose','plum','sand','night','lavender','mint','coral','sky','peach','olive','coffee','fuchsia','teal','saffron','burgundy','slate','coal','contrast'],true))throw new InvalidArgumentException('Geçerli bir tema seçin.');if(!in_array($period,[1,7,30],true))throw new InvalidArgumentException('Geçerli bir rapor dönemi seçin.');
+        api_write(function($db)use($name,$threshold,$theme,$period,$u){foreach(['shop_name'=>$name,'low_stock_default'=>(string)$threshold,'default_theme'=>$theme,'report_period'=>(string)$period] as $key=>$value){$q=$db->prepare('INSERT INTO settings(setting_key,value_text) VALUES(?,?) ON DUPLICATE KEY UPDATE value_text=VALUES(value_text)');$q->execute([$key,$value]);}ilmek_log($u,'Dükkân ayarları güncellendi',$name);return true;});
         ilmek_json(['ok'=>true,'settings'=>['shop_name'=>$name,'low_stock_default'=>$threshold,'default_theme'=>$theme,'report_period'=>$period]]);
     }
     if($route==='/api/restore'){
@@ -196,8 +200,8 @@ try {
         api_write(function($db)use($sid,$data,$u){$q=$db->prepare('SELECT status FROM sales WHERE id=? FOR UPDATE');$q->execute([$sid]);$sale=$q->fetch();if(!$sale||$sale['status']!=='completed')throw new InvalidArgumentException('Satış bulunamadı veya zaten iptal edilmiş.');$q=$db->prepare('SELECT id,product_id,qty FROM sale_items WHERE sale_id=?');$q->execute([$sid]);foreach($q->fetchAll() as $i)if($i['product_id']!==null){$r=$db->prepare('SELECT COALESCE(SUM(qty),0) FROM sale_return_items WHERE sale_item_id=?');$r->execute([(int)$i['id']]);$remaining=max(0,(int)$i['qty']-(int)$r->fetchColumn());if($remaining){$db->prepare('UPDATE products SET stock=stock+? WHERE id=?')->execute([$remaining,(int)$i['product_id']]);$it=$db->prepare('SELECT name,unit_cost FROM sale_items WHERE id=?');$it->execute([(int)$i['id']]);$item=$it->fetch();$db->prepare('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)')->execute([(int)$i['product_id'],$item['name'],$remaining,$item['unit_cost'],'Satış iptali #'.$sid,$u['id']]);}}$reason=trim((string)($data['reason']??''))?:'Hatalı satış';$db->prepare("UPDATE sales SET status='cancelled',cancel_reason=?,cancelled_at=CURRENT_TIMESTAMP WHERE id=?")->execute([$reason,$sid]);ilmek_log($u,'Satış iptal edildi',"#$sid · $reason");return true;});ilmek_json(['ok'=>true]);
     }
     if(preg_match('#^/api/products/(\d+)$#',$route,$m) && $method==='DELETE') {
-        if($u['role']!=='admin')ilmek_json(['error'=>'Only an administrator can delete products'],403);$pid=(int)$m[1];
-        api_write(function($db)use($pid,$u){$q=$db->prepare('SELECT name,stock FROM products WHERE id=? FOR UPDATE');$q->execute([$pid]);$p=$q->fetch();if(!$p)throw new InvalidArgumentException('Product not found');$q=$db->prepare('SELECT (SELECT COUNT(*) FROM sale_items WHERE product_id=?)+(SELECT COUNT(*) FROM purchase_items WHERE product_id=?)');$q->execute([$pid,$pid]);if((int)$q->fetchColumn()>0)throw new InvalidArgumentException('This product has sales or purchase history and cannot be deleted.');$db->prepare('DELETE FROM stock_log WHERE product_id=?')->execute([$pid]);$db->prepare('DELETE FROM products WHERE id=?')->execute([$pid]);ilmek_log($u,'Product deleted',$p['name']);return true;});ilmek_json(['ok'=>true]);
+        if($u['role']!=='admin')ilmek_json(['error'=>'Ürünü yalnızca yönetici silebilir.'],403);$pid=(int)$m[1];
+        api_write(function($db)use($pid,$u){$q=$db->prepare('SELECT name,stock FROM products WHERE id=? FOR UPDATE');$q->execute([$pid]);$p=$q->fetch();if(!$p)throw new InvalidArgumentException('Ürün bulunamadı.');$q=$db->prepare('SELECT (SELECT COUNT(*) FROM sale_items WHERE product_id=?)+(SELECT COUNT(*) FROM purchase_items WHERE product_id=?)');$q->execute([$pid,$pid]);if((int)$q->fetchColumn()>0)throw new InvalidArgumentException('Satış veya alış geçmişi olan ürün silinemez.');$db->prepare('DELETE FROM stock_log WHERE product_id=?')->execute([$pid]);$db->prepare('DELETE FROM products WHERE id=?')->execute([$pid]);ilmek_log($u,'Ürün silindi',$p['name']);return true;});ilmek_json(['ok'=>true]);
     }
     if(preg_match('#^/api/products/(\d+)$#',$route,$m)) {
         $pid=(int)$m[1];$r=ilmek_rate();
@@ -222,7 +226,7 @@ try {
         $name=trim((string)($data['name']??''));$variant=trim((string)($data['variant']??''));$barcode=trim((string)($data['barcode']??''))?:null;$stock=filter_var($data['stock']??0,FILTER_VALIDATE_INT);$cost=(float)($data['cost']??0);$priceTl=(float)($data['price_tl']??0);$paid=(float)($data['paid']??0);$payment=(string)($data['payment']??'Nakit');$supplier='';$debt='Bor'.chr(0xC3).chr(0xA7);
         if($name===''||$stock===false||$stock<0||$cost<0||$priceTl<0||$paid<0||abs($paid-(int)$stock*$cost)>0.01||!in_array($payment,['Nakit','Kart','IBAN'],true)||$r['value']<=0)throw new InvalidArgumentException('Ürün bilgilerini kontrol edin.');
         if($barcode!==null){$q=$db->prepare('SELECT id FROM products WHERE barcode=?');$q->execute([$barcode]);if($q->fetch())throw new InvalidArgumentException('Bu barkod başka bir üründe kayıtlı.');}$costUsd=$cost/$r['value'];$priceUsd=$priceTl/$r['value'];$image='';if(!empty($data['image']))$image=ilmek_save_image((string)$data['image']);
-        api_write(function($db)use($name,$variant,$barcode,$stock,$cost,$costUsd,$priceUsd,$data,$image,$u,$r,$paid,$payment,$supplier,$debt){$supplierId=null;$q=$db->prepare('INSERT INTO products(name,variant,barcode,supplier_id,category,stock,cost,cost_usd,price_usd,low_stock,image) VALUES(?,?,?,?,?,?,?,?,?,?,?)');$q->execute([$name,$variant,$barcode,$supplierId,trim((string)($data['category']??'')),(int)$stock,$cost,$costUsd,$priceUsd,max(0,(int)($data['low_stock']??5)),$image]);$id=(int)$db->lastInsertId();if($stock){$db->prepare('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)')->execute([$id,$name,$stock,$cost,'Initial stock',$u['id']]);$total=(int)$stock*$cost;$db->prepare('INSERT INTO purchases(supplier_id,supplier_name,total,paid,payment,exchange_rate,rate_date,note,user_id) VALUES(?,?,?,?,?,?,?,?,?)')->execute([$supplierId,$supplier,$total,$paid,$payment,$r['value'],$r['date'],'Initial stock',$u['id']]);$purchaseId=(int)$db->lastInsertId();$db->prepare("INSERT INTO purchase_items(purchase_id,product_id,name,variant,qty,unit_cost,unit_cost_usd) VALUES(?,?,?,'',?,?,?)")->execute([$purchaseId,$id,$name,$stock,$cost,$costUsd]);}ilmek_log($u,'Product created',$name);return true;});ilmek_json(['ok'=>true]);
+        api_write(function($db)use($name,$variant,$barcode,$stock,$cost,$costUsd,$priceUsd,$data,$image,$u,$r,$paid,$payment,$supplier,$debt){$supplierId=null;$q=$db->prepare('INSERT INTO products(name,variant,barcode,supplier_id,category,stock,cost,cost_usd,price_usd,low_stock,image) VALUES(?,?,?,?,?,?,?,?,?,?,?)');$q->execute([$name,$variant,$barcode,$supplierId,trim((string)($data['category']??'')),(int)$stock,$cost,$costUsd,$priceUsd,max(0,(int)($data['low_stock']??5)),$image]);$id=(int)$db->lastInsertId();if($stock){$db->prepare('INSERT INTO stock_log(product_id,name,qty,unit_cost,note,user_id) VALUES(?,?,?,?,?,?)')->execute([$id,$name,$stock,$cost,'İlk stok',$u['id']]);$total=(int)$stock*$cost;$db->prepare('INSERT INTO purchases(supplier_id,supplier_name,total,paid,payment,exchange_rate,rate_date,note,user_id) VALUES(?,?,?,?,?,?,?,?,?)')->execute([$supplierId,$supplier,$total,$paid,$payment,$r['value'],$r['date'],'İlk stok',$u['id']]);$purchaseId=(int)$db->lastInsertId();$db->prepare("INSERT INTO purchase_items(purchase_id,product_id,name,variant,qty,unit_cost,unit_cost_usd) VALUES(?,?,?,'',?,?,?)")->execute([$purchaseId,$id,$name,$stock,$cost,$costUsd]);}ilmek_log($u,'Ürün eklendi',$name);return true;});ilmek_json(['ok'=>true]);
     }
     if($route==='/api/stock') {
         $pid=(int)($data['product_id']??0);$qty=filter_var($data['qty']??0,FILTER_VALIDATE_INT);if(!$pid||$qty===false||$qty<1)throw new InvalidArgumentException('Ürün ve geçerli adet seçin.');
@@ -257,7 +261,7 @@ try {
 } catch(InvalidArgumentException|DomainException $e) {
     ilmek_json(['error'=>$e->getMessage()],400);
 } catch(PDOException $e) {
-    if($e->getCode()==='23000')ilmek_json(['error'=>'Bu kullanıcı adı kullanımda'],409);
+    if($e->getCode()==='23000')ilmek_json(['error'=>str_contains($e->getMessage(),'barcode')?'Bu barkod başka bir üründe kayıtlı.':'Bu kullanıcı adı kullanımda'],409);
     ilmek_request_log('Database/API failure '.$method.' '.$route,$e);ilmek_json(['error'=>'Veritabanı işlemi tamamlanamadı. Ayarları kontrol edin.'],500);
 } catch(Throwable $e) {
     ilmek_request_log('Unhandled API failure',$e);ilmek_json(['error'=>'Sunucu hatası; lütfen daha sonra tekrar deneyin.'],500);

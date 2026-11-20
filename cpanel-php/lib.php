@@ -92,9 +92,12 @@ function ilmek_json(mixed $body, int $status=200, array $headers=[]): never {
     exit;
 }
 
-function ilmek_body(): array {
+/* $max defaults to 8 MB (a product photo is at most ~4 MB as base64). Only the backup restore route asks for more.
+   The declared length is checked first so an oversized body is rejected before it is read into memory. */
+function ilmek_body(int $max = 8*1024*1024): array {
+    if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > $max) throw new InvalidArgumentException('İstek boyutu çok büyük.');
     $raw = file_get_contents('php://input');
-    if ($raw === false || strlen($raw) > 60*1024*1024) throw new InvalidArgumentException('İstek boyutu çok büyük.');
+    if ($raw === false || strlen($raw) > $max) throw new InvalidArgumentException('İstek boyutu çok büyük.');
     if ($raw === '') return [];
     $d = json_decode($raw, true, 64, JSON_THROW_ON_ERROR);
     if (!is_array($d)) throw new InvalidArgumentException('Geçersiz istek.');
@@ -126,6 +129,7 @@ function ilmek_require_user(bool $admin=false): array {
 
 function ilmek_new_session(int $userId): string {
     $token=bin2hex(random_bytes(32));$now=time();
+    ilmek_db()->prepare('DELETE FROM sessions WHERE last_seen<? OR created<?')->execute([$now-43200,$now-604800]);   /* drop expired sessions so the table cannot grow forever */
     ilmek_db()->prepare('INSERT INTO sessions(token_hash,user_id,created,last_seen) VALUES(?,?,?,?)')->execute([hash('sha256',$token),$userId,$now,$now]);
     setcookie('ilmek_session',$token,['expires'=>$now+604800,'path'=>'/','secure'=>true,'httponly'=>true,'samesite'=>'Strict']);
     return $token;
@@ -168,11 +172,11 @@ function ilmek_rate(): array {
 }
 
 function ilmek_save_image(string $data): string {
-    if(!preg_match('#^data:image/(webp|jpeg|png);base64,([A-Za-z0-9+/=]+)$#',$data,$m))throw new InvalidArgumentException('Upload a JPEG, PNG, or WebP product photo.');
+    if(!preg_match('#^data:image/(webp|jpeg|png);base64,([A-Za-z0-9+/=]+)$#',$data,$m))throw new InvalidArgumentException('Ürün fotoğrafı JPEG, PNG veya WebP olmalı.');
     $bytes=base64_decode($m[2],true);$type=$m[1];
-    if($bytes===false||strlen($bytes)>3*1024*1024)throw new InvalidArgumentException('Photo must be smaller than 3 MB.');
+    if($bytes===false||strlen($bytes)>3*1024*1024)throw new InvalidArgumentException('Fotoğraf 3 MB sınırını aşıyor.');
     $valid=$type==='webp'?substr($bytes,0,4)==='RIFF'&&substr($bytes,8,4)==='WEBP':($type==='jpeg'?substr($bytes,0,3)==="\xFF\xD8\xFF":substr($bytes,0,8)==="\x89PNG\r\n\x1a\n");
-    if(!$valid)throw new InvalidArgumentException('Photo data does not match its file type.');
+    if(!$valid)throw new InvalidArgumentException('Fotoğraf verisi dosya türüyle uyuşmuyor.');
     $ext=$type==='jpeg'?'jpg':$type;$dir=ilmek_data_dir().'/images';if(!is_dir($dir)&&!mkdir($dir,0700,true)&&!is_dir($dir))throw new RuntimeException('Unable to create photo folder.');
     $name=bin2hex(random_bytes(16)).'.'.$ext;if(file_put_contents($dir.'/'.$name,$bytes,LOCK_EX)===false)throw new RuntimeException('Unable to save photo.');@chmod($dir.'/'.$name,0600);
     return '/images/'.$name;

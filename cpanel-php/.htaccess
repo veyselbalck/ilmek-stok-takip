@@ -10,3 +10,20 @@ RewriteRule ^(venv|__pycache__|tmp)(/|$) - [F,L]
 <FilesMatch "^(\.ilmek\.env|.*\.(py|zip))$">
   Require all denied
 </FilesMatch>
+
+# Security headers. The UI uses no inline scripts, so scripts are restricted to this origin.
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "DENY"
+  Header always set Referrer-Policy "same-origin"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+  Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
+  # Pages, scripts and styles are re-checked on every load (cheap 304), so an update is never shadowed by a stale cached copy.
+  <FilesMatch "\.(html|js|css)$">
+    Header set Cache-Control "no-cache"
+  </FilesMatch>
+  <FilesMatch "\.woff2$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+</IfModule>

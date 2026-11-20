@@ -15,8 +15,8 @@ Güzel Hosting'in yanıtı Python/Passenger desteği olmadığını, PHP uygulam
 ## Hazırlama
 
 1. cPanel **MySQL Database Wizard** ile yeni bir veritabanı ve kullanıcı oluşturun; kullanıcıya veritabanı için tüm izinleri verin. cPanel'in eklediği hesap önekli tam adları not edin.
-2. cPanel **Domains** ekranında `stoksistem.yildizbeautyhair.com` için belge kökünü belirleyin. Python uygulamasını artık bu subdomain'e bağlamayın; Application Manager'daki eski Python uygulamasını **Unregister** edin.
-3. `cpanel-php` klasöründeki dosyaları subdomain'in belge köküne yükleyin. `index.html`, `.htaccess`, `api.php`, `image.php` ve `lib.php` aynı klasörde olmalı. `.htaccess` API ve ürün görsellerini yönlendirir.
+2. cPanel **Domains** ekranında `stok.ornek-alan.com` için belge kökünü belirleyin. Python uygulamasını artık bu subdomain'e bağlamayın; Application Manager'daki eski Python uygulamasını **Unregister** edin.
+3. `cpanel-php` klasöründeki dosyaları ve ana dizindeki `index.html`, `app.js`, `style.css`, `favicon.svg` dosyalarını ile `fonts` klasörünü subdomain'in belge köküne yükleyin. `index.html`, `.htaccess`, `api.php`, `image.php`, `lib.php` ve `fonts` aynı klasörde olmalı. `.htaccess` API ve ürün görsellerini yönlendirir.
 4. Ana dizinde, belge kökünün dışında `/home/CPANEL_KULLANICISI/ilmek-config.php` oluşturun. İçeriğini kendi bilgilerinizle doldurun:
 
    ```php
@@ -37,7 +37,7 @@ Güzel Hosting'in yanıtı Python/Passenger desteği olmadığını, PHP uygulam
 
    Veritabanı parolası ve kurulum anahtarını dosyaya girin, sohbette paylaşmayın. Kurulum anahtarı için Terminal'de `php -r 'echo bin2hex(random_bytes(32)), PHP_EOL;'` çalıştırabilirsiniz. Dosya iznini `chmod 600 ~/ilmek-config.php` yapın. `data_dir` web kökünün dışında kalmalıdır. Uygulama ilk istekte tabloları kendisi oluşturur.
 
-5. cPanel **SSL/TLS Status** üzerinden subdomain için SSL'in etkin olduğunu doğrulayın. İlk yönetici kurulumu token ile korunur. `https://stoksistem.yildizbeautyhair.com` adresinde ilk yönetici hesabını oluşturun. Sonra `ilmek-config.php` içindeki `setup_token` değerini boşaltın ve dosya iznini tekrar `600` yapın.
+5. cPanel **SSL/TLS Status** üzerinden subdomain için SSL'in etkin olduğunu doğrulayın. İlk yönetici kurulumu token ile korunur. `https://stok.ornek-alan.com` adresinde ilk yönetici hesabını oluşturun. Sonra `ilmek-config.php` içindeki `setup_token` değerini boşaltın ve dosya iznini tekrar `600` yapın.
 
 ## Yedekleme
 
